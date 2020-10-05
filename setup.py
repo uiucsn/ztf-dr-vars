@@ -7,6 +7,7 @@ setup(
     entry_points={'console_scripts': [
         'put-vsx = ch_vars.vsx:main',
         'put-asassn-var = ch_vars.asassn:main',
+        'put-sdss-82-var = ch_vars.sdss:main',
     ]},
     include_package_data=True,
     url='',
