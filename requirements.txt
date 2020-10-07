@@ -2,3 +2,4 @@ astropy
 numpy
 clickhouse-driver
 matplotlib
+pandas
