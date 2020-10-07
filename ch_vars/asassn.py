@@ -24,7 +24,3 @@ def main():
 
     table = get_data()
     create_ch_table('asassn_var.asassn_var_meta', table)
-
-
-if __name__ == '__main__':
-    main()

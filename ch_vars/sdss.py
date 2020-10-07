@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import logging
 
 from astropy.io import ascii
