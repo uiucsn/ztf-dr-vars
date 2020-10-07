@@ -19,4 +19,4 @@ def main():
     logging.basicConfig(level=logging.DEBUG)
 
     table = get_data()
-    create_ch_table('sdss.stripe82_vars', table)
+    create_ch_table('sdss.stripe82_candidates', table)

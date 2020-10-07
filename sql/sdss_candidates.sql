@@ -33,7 +33,7 @@ FROM
                 arrayJoin(h3kRing(h3index10, toUInt8(ceil((1. / 3600.) / h3EdgeAngle(10))))) AS h3index10,
                 radeg AS ra_asassn,
                 dedeg AS dec_asassn
-            FROM sdss.stripe82_vars
+            FROM sdss.stripe82_candidates
         ) AS asassn USING (h3index10)
         WHERE (catflags = 0) AND (greatCircleAngle(ra, dec, ra_asassn, dec_asassn) <= (1. / 3600.))
     )
