@@ -97,4 +97,3 @@ def main():
 
     for catalog in FILE_NAMES:
         plot(catalog)
-    # plot('sdss')
