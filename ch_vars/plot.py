@@ -30,24 +30,29 @@ class VarTypeColumn:
 @dataclass(frozen=True, eq=False)
 class Catalog:
     filename: str
+    id_column: str
     var_type_column: VarTypeColumn
 
 
 CATALOGS = {
     'sdss-vars': Catalog(
         filename='ztf-sdss-vars.csv.xz',
+        id_column='sdss_name',
         var_type_column=VarTypeColumn('bhatti_vartype'),
     ),
     'sdss-candidates': Catalog(
         filename='ztf-sdss.csv.xz',
+        id_column='sdss_name',
         var_type_column=VarTypeColumn('segue_tags'),
     ),
     'asassn': Catalog(
         filename='ztf-asassn.csv.xz',
+        id_column='asassn_name',
         var_type_column=VarTypeColumn('asassn_type'),
     ),
     'vsx': Catalog(
         filename='ztf-vsx.csv.xz',
+        id_column='vsx_oid',
         var_type_column=VarTypeColumn(
             'type',
             converter=lambda s: s.split('/')[0],
@@ -88,14 +93,14 @@ def load_data(catalog, data_path):
     logging.info(f'Loading data for {catalog}')
     cat = CATALOGS[catalog]
     path = os.path.join(data_path, cat.filename)
-    array_cols = ('mag', 'filter',)
+    array_cols = ('mjd', 'mag', 'magerr', 'filter',)
     converters = dict.fromkeys(array_cols, str_to_array)
     converters['filter'] = partial(str_to_array, dtype=np.uint8)
     converters[cat.var_type_column.name] = cat.var_type_column.converter
     na_values = {cat.var_type_column.name: ()}
-    cols = (cat.var_type_column.name,) + array_cols
+    cols = (cat.id_column, cat.var_type_column.name,) + array_cols
     table = pd.read_csv(path, usecols=cols, converters=converters, na_values=na_values,)
-    table.rename(columns={cat.var_type_column.name: 'var_type'}, inplace=True, errors='raise')
+    table.rename(columns={cat.id_column: 'id', cat.var_type_column.name: 'var_type'}, inplace=True, errors='raise')
     if cat.var_type_column.skip_value is not None:
         idx = table['var_type'].str.contains(
             cat.var_type_column.skip_value,
@@ -196,6 +201,52 @@ def plot_var_types_chart(table, catalog, fig_path):
     plt.close(fig)
 
 
+def plot_lc_examples(table, catalog, fig_path, bands=tuple(BAND_NAMES), n_per_type=9, rng=None):
+    n_rows = n_columns = int(np.sqrt(n_per_type))
+    if n_rows * n_columns != n_per_type:
+        msg = f'n_per_type must be a square of a natural number, not {n_per_type}'
+        logging.warning(msg)
+        raise ValueError(msg)
+
+    rng = np.random.default_rng(rng)
+
+    var_types, inverse_idx = np.unique(table['var_type'], return_inverse=True)
+
+    for type_idx, t in enumerate(var_types):
+        positions = np.where(inverse_idx == type_idx)[0]
+        try:
+            object_positions = rng.choice(positions, n_per_type, replace=False)
+        except ValueError:
+            msg = f'n_per_object is {n_per_type} but there are only {positions.size} of objects of type {t}'
+            logging.warning(msg)
+            continue
+
+        fig, ax_ = plt.subplots(n_rows, n_columns, figsize=(n_rows * 4, n_columns * 4))
+        fig.suptitle(f'{t} type objects from {catalog}')
+        for ax, obj_idx in np.nditer([ax_, object_positions.reshape(n_rows, n_columns)], flags=['refs_ok']):
+            ax = ax.item()
+            obj = table.iloc[obj_idx]
+            lcs = {band: {'mjd': obj['mjd'][idx], 'mag': obj['mag'][idx], 'magerr': obj['magerr'][idx]}
+                   for band in bands
+                   if np.count_nonzero(idx := obj['filter'] == band) > 0}
+            ax.set_title(obj['id'])
+            ax.set_xlabel('MJD')
+            ax.set_ylabel('mag')
+            ax.invert_yaxis()
+            for band, lc in lcs.items():
+                ax.errorbar(
+                    lc['mjd'], lc['mag'], lc['magerr'],
+                    ls='', marker='x', color=COLORS[band],
+                    label=BAND_NAMES[band],
+                )
+            ax.legend(loc='upper right')
+        path = os.path.join(fig_path, f'{catalog}_{t}.png')
+        logging.info(f'Saving figure to {path}')
+        fig.tight_layout()
+        fig.savefig(path)
+        plt.close(fig)
+
+
 def plot(catalog, data_path, fig_path):
     table = load_data(catalog, data_path=data_path)
 
@@ -206,6 +257,15 @@ def plot(catalog, data_path, fig_path):
     plot_mean_mag(table, catalog, fig_path=fig_path, bands=bands)
     plot_obs_count(table, catalog, fig_path=fig_path, bands=bands)
     plot_var_types_chart(table, catalog, fig_path=fig_path)
+
+    examples_path = os.path.join(fig_path, 'lc_examples')
+    os.makedirs(examples_path, exist_ok=True)
+    threshold = VAR_TYPE_THRESHOLDS[1]
+    idx_path_threshold = reduce(
+        and_,
+        (table[obs_count_column_name(band)] >= min_value for band, min_value in threshold.items()),
+    )
+    plot_lc_examples(table[idx_path_threshold], catalog, fig_path=examples_path, rng=0)
 
 
 def parse_args():
