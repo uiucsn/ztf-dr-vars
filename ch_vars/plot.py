@@ -1,22 +1,27 @@
 import logging
 import os
+import re
 from argparse import ArgumentParser
 from dataclasses import dataclass
 from functools import partial, reduce
 from itertools import chain
 from operator import and_
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional, Union
 
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from ch_vars.vsx import VSX_TYPE_MAP
+
 
 @dataclass(frozen=True, eq=False)
 class VarTypeColumn:
     name: str
     converter: Callable = str
+    skip_value: Union[str, re.Pattern, None] = None
+    map: Optional[Callable] = None
 
     def __repr__(self):
         return self.name
@@ -24,13 +29,8 @@ class VarTypeColumn:
 
 @dataclass(frozen=True, eq=False)
 class Catalog:
-    @staticmethod
-    def none_mask(*_args, **_kwargs):
-        return slice(None)
-
     filename: str
     var_type_column: VarTypeColumn
-    mask: Callable = none_mask
 
 
 CATALOGS = {
@@ -50,11 +50,10 @@ CATALOGS = {
         filename='ztf-vsx.csv.xz',
         var_type_column=VarTypeColumn(
             'type',
-            # Take main type only
-            converter=lambda s: s.split('/', maxsplit=1)[0],
+            converter=lambda s: s.split('/')[0],
+            skip_value=re.compile(r'[:|+]'),
+            map=lambda x: VSX_TYPE_MAP[x],
         ),
-        # : and | are uncertainty flags and + is for multiple types
-        mask=lambda table: ~table['var_type'].str.contains(r'[:|+]', regex=True, na=False),
     ),
 }
 
@@ -97,7 +96,19 @@ def load_data(catalog, data_path):
     cols = (cat.var_type_column.name,) + array_cols
     table = pd.read_csv(path, usecols=cols, converters=converters, na_values=na_values,)
     table.rename(columns={cat.var_type_column.name: 'var_type'}, inplace=True, errors='raise')
-    table = table[cat.mask(table)]
+    if cat.var_type_column.skip_value is not None:
+        idx = table['var_type'].str.contains(
+            cat.var_type_column.skip_value,
+            regex=isinstance(cat.var_type_column.skip_value, re.Pattern)
+        )
+        table['var_type'][idx] = None
+    table = table[~table['var_type'].isna()]
+    if cat.var_type_column.map is not None:
+        try:
+            table['var_type'] = table['var_type'].map(cat.var_type_column.map)
+        except KeyError as e:
+            dif = set(table['var_type']) - set(VSX_TYPE_MAP)
+            raise RuntimeError(f'{dif}') from e
     return table
 
 
@@ -152,7 +163,7 @@ def plot_var_types_chart(table, catalog, fig_path):
     coords = dict(zip(var_types, x))
     logging.debug(f'{coords}')
 
-    fig, ax = plt.subplots(figsize=(24, 12), dpi=300)
+    fig, ax = plt.subplots(figsize=(12, 6))
 
     ax.set_title(catalog)
     ax.set_ylabel('Count')
@@ -175,11 +186,12 @@ def plot_var_types_chart(table, catalog, fig_path):
         )
     ax.set_ylim([1, None])
     ax.set_xticks(x)
-    ax.set_xticklabels(var_types, rotation='vertical')
+    ax.set_xticklabels(var_types, rotation=60, ha='right')
     ax.legend()
 
     path = os.path.join(fig_path, f'{catalog}_var-types.png')
     logging.info(f'Saving figure to {path}')
+    fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
 

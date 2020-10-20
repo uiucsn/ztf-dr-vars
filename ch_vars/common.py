@@ -66,3 +66,18 @@ def create_ch_table(name, data):
         (dict(zip(columns, fix_invalid(values))) for values in data.iterrows()),
     )
     logging.debug(f'Result: {result}')
+
+
+class JoinedVarType:
+    def __init__(self, name, *types, description):
+        self.name = name
+        if not types:
+            types = [name]
+        self.types = frozenset(types)
+        self.description = description
+
+    def __contains__(self, item):
+        return item in self.types
+
+    def __repr__(self):
+        return f'VarType {self.name} containing subtypes {", ".join(sorted(self.types))}'
