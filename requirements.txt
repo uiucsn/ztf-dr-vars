@@ -3,3 +3,5 @@ numpy
 clickhouse-driver
 matplotlib
 pandas
+gatspy
+scipy

@@ -1,8 +1,9 @@
+import dataclasses
 import logging
 import os
 import re
 from argparse import ArgumentParser
-from dataclasses import dataclass
+from copy import copy
 from functools import partial, reduce
 from itertools import chain
 from operator import and_
@@ -12,11 +13,22 @@ import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from gatspy.periodic import LombScargleMultibandFast
 
 from ch_vars.vsx import VSX_TYPE_MAP
 
 
-@dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True)
+class PeriodRange:
+    min_period: float = 30. / 3600.
+    max_period: float = np.inf
+
+    @property
+    def range(self):
+        return self.min_period, self.max_period
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
 class VarTypeColumn:
     name: str
     converter: Callable = str
@@ -27,11 +39,12 @@ class VarTypeColumn:
         return self.name
 
 
-@dataclass(frozen=True, eq=False)
+@dataclasses.dataclass(frozen=True, eq=False)
 class Catalog:
     filename: str
     id_column: str
     var_type_column: VarTypeColumn
+    periodic_types: dict = dataclasses.field(default_factory=dict)
 
 
 CATALOGS = {
@@ -49,6 +62,9 @@ CATALOGS = {
         filename='ztf-asassn.csv.xz',
         id_column='asassn_name',
         var_type_column=VarTypeColumn('asassn_type'),
+        periodic_types={
+            'M': PeriodRange(min_period=50),
+        }
     ),
     'vsx': Catalog(
         filename='ztf-vsx.csv.xz',
@@ -59,6 +75,18 @@ CATALOGS = {
             skip_value=re.compile(r'[:|+]'),
             map=lambda x: VSX_TYPE_MAP[x],
         ),
+        periodic_types={
+            'Cepheid': PeriodRange(min_period=0.1, max_period=200),
+            'Eclipsing': PeriodRange(min_period=0.01, max_period=2000),
+            'Ellipsoidal': PeriodRange(min_period=0.01, max_period=1000),
+            'Heatbeat': PeriodRange(min_period=0.5),
+            'Mira': PeriodRange(min_period=50),
+            'RS CVn': PeriodRange(min_period=10),
+            'RR Lyr': PeriodRange(min_period=0.05, max_period=5),
+            'ZZ Ceti': PeriodRange(max_period=0.1),
+            'γ Dor': PeriodRange(min_period=0.1, max_period=10),
+            'δ Sct': PeriodRange(max_period=5),
+        },
     ),
 }
 
@@ -83,6 +111,19 @@ VAR_TYPE_THRESHOLDS = (
 
 MAGN_BINS = np.arange(15, 23, 0.5)
 OBS_COUNT_BINS = np.arange(0, 2000, 25)
+
+
+def fold_lc(obj, period_range):
+    lsmf = LombScargleMultibandFast(fit_period=True)
+    period_range = period_range[0], min(period_range[1], np.ptp(obj['mjd']))
+    lsmf.optimizer.period_range = period_range
+    lsmf.fit(obj['mjd'], obj['mag'], obj['magerr'], obj['filter'])
+    phase = obj['mjd'] % lsmf.best_period / lsmf.best_period
+    folded = np.rec.fromrecords(
+        tuple(copy(obj[name]) if name != 'mjd' else phase for name in obj.dtype.names),
+        dtype=[(name, dt) if name != 'mjd' else ('phase', object) for name, dt in obj.dtype.descr],
+    )
+    return folded
 
 
 def str_to_array(s, dtype=float):
@@ -201,12 +242,64 @@ def plot_var_types_chart(table, catalog, fig_path):
     plt.close(fig)
 
 
+def plot_lc(ax, obj, *, bands):
+    lcs = {band: {'mjd': obj['mjd'].item()[idx], 'mag': obj['mag'].item()[idx], 'magerr': obj['magerr'].item()[idx]}
+           for band in bands
+           if np.count_nonzero(idx := obj['filter'].item() == band) > 0}
+    ax.set_title(obj['id'])
+    ax.set_xlabel('MJD')
+    ax.set_ylabel('mag')
+    ax.invert_yaxis()
+    for band, lc in lcs.items():
+        ax.errorbar(
+            lc['mjd'], lc['mag'], lc['magerr'],
+            ls='', marker='x', color=COLORS[band],
+            label=BAND_NAMES[band],
+        )
+    ax.legend(loc='upper right')
+
+
+def plot_folded(ax, obj, *, bands):
+    lcs = {band: {'phase': obj['phase'].item()[idx], 'mag': obj['mag'].item()[idx], 'magerr': obj['magerr'].item()[idx]}
+           for band in bands
+           if np.count_nonzero(idx := obj['filter'].item() == band) > 0}
+    ax.set_title(obj['id'])
+    ax.set_xlabel('phase')
+    ax.set_ylabel('mag')
+    ax.invert_yaxis()
+    for band, lc in lcs.items():
+        for repeat in range(-1, 2):
+            label = BAND_NAMES[band] if repeat == 0 else ''
+            ax.errorbar(
+                lc['phase'] + repeat, lc['mag'], lc['magerr'],
+                ls='', marker='x', color=COLORS[band],
+                label=label,
+            )
+    ax.set_xlim([-0.2, 1.8])
+    ax.legend(loc='upper right')
+
+
+def plot_lcs(objs, *, path, suptitle, bands, ax_plot=plot_lc):
+    n_rows, n_columns = objs.shape
+    fig, ax_ = plt.subplots(n_rows, n_columns, figsize=(n_rows * 4, n_columns * 4))
+    fig.suptitle(suptitle)
+    for ax, obj in np.nditer([ax_, objs], flags=['refs_ok']):
+        ax = ax.item()
+        ax_plot(ax, obj, bands=bands)
+    logging.info(f'Saving figure to {path}')
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
 def plot_lc_examples(table, catalog, fig_path, bands=tuple(BAND_NAMES), n_per_type=9, rng=None):
     n_rows = n_columns = int(np.sqrt(n_per_type))
     if n_rows * n_columns != n_per_type:
         msg = f'n_per_type must be a square of a natural number, not {n_per_type}'
         logging.warning(msg)
         raise ValueError(msg)
+
+    cat = CATALOGS[catalog]
 
     rng = np.random.default_rng(rng)
 
@@ -220,31 +313,31 @@ def plot_lc_examples(table, catalog, fig_path, bands=tuple(BAND_NAMES), n_per_ty
             msg = f'n_per_object is {n_per_type} but there are only {positions.size} of objects of type {t}'
             logging.warning(msg)
             continue
+        objects = table.iloc[object_positions].to_records().reshape(n_rows, n_columns)
 
-        fig, ax_ = plt.subplots(n_rows, n_columns, figsize=(n_rows * 4, n_columns * 4))
-        fig.suptitle(f'{t} type objects from {catalog}')
-        for ax, obj_idx in np.nditer([ax_, object_positions.reshape(n_rows, n_columns)], flags=['refs_ok']):
-            ax = ax.item()
-            obj = table.iloc[obj_idx]
-            lcs = {band: {'mjd': obj['mjd'][idx], 'mag': obj['mag'][idx], 'magerr': obj['magerr'][idx]}
-                   for band in bands
-                   if np.count_nonzero(idx := obj['filter'] == band) > 0}
-            ax.set_title(obj['id'])
-            ax.set_xlabel('MJD')
-            ax.set_ylabel('mag')
-            ax.invert_yaxis()
-            for band, lc in lcs.items():
-                ax.errorbar(
-                    lc['mjd'], lc['mag'], lc['magerr'],
-                    ls='', marker='x', color=COLORS[band],
-                    label=BAND_NAMES[band],
-                )
-            ax.legend(loc='upper right')
-        path = os.path.join(fig_path, f'{catalog}_{t}.png')
-        logging.info(f'Saving figure to {path}')
-        fig.tight_layout()
-        fig.savefig(path)
-        plt.close(fig)
+        plot_lcs(
+            objects,
+            path=os.path.join(fig_path, f'{catalog}_{t}.png'),
+            suptitle=f'{t} objects from {catalog}',
+            bands=bands,
+            ax_plot=plot_lc,
+        )
+
+        try:
+            period_range = cat.periodic_types[t]
+        except KeyError:
+            pass
+        else:
+            folded_objects = np.array(
+                [fold_lc(obj, period_range=period_range.range) for obj in objects.flat]
+            ).reshape(objects.shape)
+            plot_lcs(
+                folded_objects,
+                path=os.path.join(fig_path, f'{catalog}_{t}_folded.png'),
+                suptitle=f'{t} objects from {catalog}',
+                bands=bands,
+                ax_plot=plot_folded,
+            )
 
 
 def plot(catalog, data_path, fig_path):
