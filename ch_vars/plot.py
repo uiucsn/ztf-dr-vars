@@ -81,6 +81,7 @@ CATALOGS = {
             'Ellipsoidal': PeriodRange(min_period=0.01, max_period=1000),
             'Heatbeat': PeriodRange(min_period=0.5),
             'Mira': PeriodRange(min_period=50),
+            'R': PeriodRange(max_period=10),
             'RS CVn': PeriodRange(min_period=10),
             'RR Lyr': PeriodRange(min_period=0.05, max_period=5),
             'ZZ Ceti': PeriodRange(max_period=0.1),
