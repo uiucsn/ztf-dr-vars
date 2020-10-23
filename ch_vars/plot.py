@@ -118,11 +118,12 @@ def fold_lc(obj, period_range):
     period_range = period_range[0], min(period_range[1], np.ptp(obj['mjd']))
     lsmf.optimizer.period_range = period_range
     lsmf.fit(obj['mjd'], obj['mag'], obj['magerr'], obj['filter'])
-    phase = obj['mjd'] % lsmf.best_period / lsmf.best_period
-    folded = np.rec.fromrecords(
-        tuple(copy(obj[name]) if name != 'mjd' else phase for name in obj.dtype.names),
-        dtype=[(name, dt) if name != 'mjd' else ('phase', object) for name, dt in obj.dtype.descr],
-    )
+    period = lsmf.best_period
+    folded_time = obj['mjd'] % period
+    phase = folded_time / period
+    records = copy(obj.item()) + (folded_time, phase, period)
+    dtype = obj.dtype.descr + [('folded_time', object), ('phase', object), ('period', float)]
+    folded = np.rec.fromrecords(records, dtype=dtype)
     return folded
 
 
@@ -263,7 +264,7 @@ def plot_folded(ax, obj, *, bands):
     lcs = {band: {'phase': obj['phase'].item()[idx], 'mag': obj['mag'].item()[idx], 'magerr': obj['magerr'].item()[idx]}
            for band in bands
            if np.count_nonzero(idx := obj['filter'].item() == band) > 0}
-    ax.set_title(obj['id'])
+    ax.set_title(f'{obj["id"]}, P = {obj["period"]:.3g}')
     ax.set_xlabel('phase')
     ax.set_ylabel('mag')
     ax.invert_yaxis()
@@ -276,6 +277,8 @@ def plot_folded(ax, obj, *, bands):
                 label=label,
             )
     ax.set_xlim([-0.2, 1.8])
+    secax = ax.secondary_xaxis('top', functions=(lambda x: x * obj['period'], lambda x: x / obj['period']))
+    secax.set_xlabel('Folded time, days')
     ax.legend(loc='upper right')
 
 
