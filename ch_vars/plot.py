@@ -7,8 +7,9 @@ from copy import copy
 from functools import partial, reduce
 from itertools import chain
 from operator import and_
-from typing import Callable, Dict, Optional, Union
+from typing import Callable, Optional, Union
 
+import george
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -64,6 +65,7 @@ CATALOGS = {
         var_type_column=VarTypeColumn('asassn_type'),
         periodic_types={
             'M': PeriodRange(min_period=50),
+            'RRAB': PeriodRange(min_period=0.05, max_period=5),
         }
     ),
     'vsx': Catalog(
@@ -104,6 +106,13 @@ COLORS = {
     3: 'black',
 }
 
+
+BAND_WAVELENGTHS = {
+    1: 4722.74,
+    2: 6339.61,
+    3: 7886.13,
+}
+
 VAR_TYPE_THRESHOLDS = (
     {1: 50, 2: 50, 3: 0},
     {1: 100, 2: 100, 3: 0},
@@ -120,10 +129,9 @@ def fold_lc(obj, period_range):
     lsmf.optimizer.period_range = period_range
     lsmf.fit(obj['mjd'], obj['mag'], obj['magerr'], obj['filter'])
     period = lsmf.best_period
-    folded_time = obj['mjd'] % period
-    phase = folded_time / period
-    records = copy(obj.item()) + (folded_time, phase, period)
-    dtype = obj.dtype.descr + [('folded_time', object), ('phase', object), ('period', float)]
+    phase = obj['mjd'] % period / period
+    records = copy(obj.item()) + (phase, period,)
+    dtype = obj.dtype.descr + [('phase', object), ('period', float)]
     folded = np.rec.fromrecords(records, dtype=dtype)
     return folded
 
@@ -261,6 +269,27 @@ def plot_lc(ax, obj, *, bands):
     ax.legend(loc='upper right')
 
 
+def approx_periodic(lc) -> Optional:
+    _, idx = np.unique(lc['phase'], return_index=True)
+    if idx.size < 10:
+        return None
+    phase = lc['phase'][idx]
+    mag = lc['mag'][idx]
+    magerr = lc['magerr'][idx]
+    mean = np.average(mag, weights=magerr**-2)
+    mag -= mean
+    kernel = george.kernels.ExpSine2Kernel(gamma=1.0, log_period=0.0)
+    # No fitting => no reason to freeze
+    # kernel.freeze_parameter('k2:log_period')
+    gp = george.GP(kernel)
+    gp.compute(phase, magerr)
+
+    def f(x):
+        return gp.predict(mag, x, return_cov=False, return_var=False) + mean
+
+    return f
+
+
 def plot_folded(ax, obj, *, bands):
     lcs = {band: {'phase': obj['phase'].item()[idx], 'mag': obj['mag'].item()[idx], 'magerr': obj['magerr'].item()[idx]}
            for band in bands
@@ -275,8 +304,15 @@ def plot_folded(ax, obj, *, bands):
             ax.errorbar(
                 lc['phase'] + repeat, lc['mag'], lc['magerr'],
                 ls='', marker='x', color=COLORS[band],
-                label=label,
+                label=label, alpha=0.2,
             )
+        spline = approx_periodic(lc)
+        if spline is None:
+            continue
+        ph = np.linspace(0, 1.0, 1024)
+        interp = spline(ph)
+        for repeat in range(-1, 2):
+            ax.plot(ph + repeat, interp, '-', color=COLORS[band], label='')
     ax.set_xlim([-0.2, 1.8])
     secax = ax.secondary_xaxis('top', functions=(lambda x: x * obj['period'], lambda x: x / obj['period']))
     secax.set_xlabel('Folded time, days')
@@ -314,7 +350,7 @@ def plot_lc_examples(table, catalog, fig_path, bands=tuple(BAND_NAMES), n_per_ty
         try:
             object_positions = rng.choice(positions, n_per_type, replace=False)
         except ValueError:
-            msg = f'n_per_object is {n_per_type} but there are only {positions.size} of objects of type {t}'
+            msg = f'n_per_type is {n_per_type} but there are only {positions.size} of objects of type {t}'
             logging.warning(msg)
             continue
         objects = table.iloc[object_positions].to_records().reshape(n_rows, n_columns)
