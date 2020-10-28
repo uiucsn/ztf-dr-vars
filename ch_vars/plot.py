@@ -41,11 +41,19 @@ class VarTypeColumn:
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
+class TypePlotAll:
+    threshold: dict = dataclasses.field(default_factory=lambda: {1: 50, 2: 50, 3: 50})
+    as_is: bool = False
+    folded: bool = False
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
 class Catalog:
     filename: str
     id_column: str
     var_type_column: VarTypeColumn
     periodic_types: dict = dataclasses.field(default_factory=dict)
+    types_plot_all: dict = dataclasses.field(default_factory=dict)
 
 
 CATALOGS = {
@@ -90,6 +98,13 @@ CATALOGS = {
             'γ Dor': PeriodRange(min_period=0.1, max_period=10),
             'δ Sct': PeriodRange(max_period=5),
         },
+        types_plot_all={
+            'Cepheid': TypePlotAll(threshold={1: 50, 2: 50, 3: 20}, folded=True),
+            'Ellipsoidal': TypePlotAll(threshold={1: 100, 2: 100, 3: 0}, folded=True),
+            'R': TypePlotAll(threshold={1: 100, 2: 100, 3: 0}, folded=True),
+            'RR Lyr': TypePlotAll(threshold={1: 50, 2: 50, 3: 50}, folded=True),
+            'δ Sct': TypePlotAll(threshold={1: 50, 2: 50, 3: 40}, folded=True),
+        },
     ),
 }
 
@@ -114,8 +129,8 @@ BAND_WAVELENGTHS = {
 }
 
 VAR_TYPE_THRESHOLDS = (
-    {1: 50, 2: 50, 3: 0},
     {1: 100, 2: 100, 3: 0},
+    {1: 50, 2: 50, 3: 25},
     {1: 50, 2: 50, 3: 50},
 )
 
@@ -252,6 +267,21 @@ def plot_var_types_chart(table, catalog, fig_path):
     plt.close(fig)
 
 
+def approx(lc, timescale=3) -> Optional[Callable]:
+    if lc.size < 10:
+        return None
+    mean = np.average(lc['mag'], weights=lc['magerr']**-2)
+    mag = lc['mag'] - mean
+    kernel = np.var(mag) * george.kernels.ExpSquaredKernel(timescale)
+    gp = george.GP(kernel)
+    gp.compute(lc['mjd'], lc['magerr'])
+
+    def f(x):
+        return gp.predict(mag, x, return_cov=False, return_var=False) + mean
+
+    return f
+
+
 def plot_lc(ax, obj, *, bands):
     lcs = {band: {'mjd': obj['mjd'].item()[idx], 'mag': obj['mag'].item()[idx], 'magerr': obj['magerr'].item()[idx]}
            for band in bands
@@ -263,13 +293,21 @@ def plot_lc(ax, obj, *, bands):
     for band, lc in lcs.items():
         ax.errorbar(
             lc['mjd'], lc['mag'], lc['magerr'],
-            ls='', marker='x', color=COLORS[band],
+            ls='', marker='x', color=COLORS[band], alpha=0.3,
             label=BAND_NAMES[band],
         )
+        ylim = ax.get_ylim()
+        spline = approx(lc)
+        if spline is None:
+            continue
+        t = np.linspace(lc['mjd'].min(), lc['mjd'].max(), 128)
+        interp = spline(t)
+        ax.plot(t, interp, '-', color=COLORS[band], label='')
+        ax.set_ylim(ylim)
     ax.legend(loc='upper right')
 
 
-def approx_periodic(lc) -> Optional:
+def approx_periodic(lc, period=1.0) -> Optional[Callable]:
     _, idx = np.unique(lc['phase'], return_index=True)
     if idx.size < 10:
         return None
@@ -278,7 +316,7 @@ def approx_periodic(lc) -> Optional:
     magerr = lc['magerr'][idx]
     mean = np.average(mag, weights=magerr**-2)
     mag -= mean
-    kernel = george.kernels.ExpSine2Kernel(gamma=1.0, log_period=0.0)
+    kernel = george.kernels.ExpSine2Kernel(gamma=1.0, log_period=np.log(period))
     # No fitting => no reason to freeze
     # kernel.freeze_parameter('k2:log_period')
     gp = george.GP(kernel)
@@ -304,15 +342,17 @@ def plot_folded(ax, obj, *, bands):
             ax.errorbar(
                 lc['phase'] + repeat, lc['mag'], lc['magerr'],
                 ls='', marker='x', color=COLORS[band],
-                label=label, alpha=0.2,
+                label=label, alpha=0.1,
             )
+        ylim = ax.set_ylim()
         spline = approx_periodic(lc)
         if spline is None:
             continue
-        ph = np.linspace(0, 1.0, 1024)
+        ph = np.linspace(0, 1.0, 128)
         interp = spline(ph)
         for repeat in range(-1, 2):
             ax.plot(ph + repeat, interp, '-', color=COLORS[band], label='')
+        ax.set_ylim(ylim)
     ax.set_xlim([-0.2, 1.8])
     secax = ax.secondary_xaxis('top', functions=(lambda x: x * obj['period'], lambda x: x / obj['period']))
     secax.set_xlabel('Folded time, days')
@@ -347,12 +387,11 @@ def plot_lc_examples(table, catalog, fig_path, bands=tuple(BAND_NAMES), n_per_ty
 
     for type_idx, t in enumerate(var_types):
         positions = np.where(inverse_idx == type_idx)[0]
-        try:
-            object_positions = rng.choice(positions, n_per_type, replace=False)
-        except ValueError:
+        if n_per_type < positions.size:
             msg = f'n_per_type is {n_per_type} but there are only {positions.size} of objects of type {t}'
             logging.warning(msg)
             continue
+        object_positions = rng.choice(positions, n_per_type, replace=False)
         objects = table.iloc[object_positions].to_records().reshape(n_rows, n_columns)
 
         plot_lcs(
@@ -380,7 +419,20 @@ def plot_lc_examples(table, catalog, fig_path, bands=tuple(BAND_NAMES), n_per_ty
             )
 
 
+def plot_all_lc(objects, catalog, fig_path, bands=tuple(BAND_NAMES), ax_plot=plot_lc):
+    for obj in objects:
+        plot_lcs(
+            np.array([[obj]]),
+            path=os.path.join(fig_path, f'{obj["id"]}.png'),
+            suptitle='',
+            bands=bands,
+            ax_plot=ax_plot,
+        )
+
+
 def plot(catalog, data_path, fig_path):
+    cat = CATALOGS[catalog]
+
     table = load_data(catalog, data_path=data_path)
 
     bands = sorted(set(chain.from_iterable(table['filter'])))
@@ -393,12 +445,29 @@ def plot(catalog, data_path, fig_path):
 
     examples_path = os.path.join(fig_path, 'lc_examples')
     os.makedirs(examples_path, exist_ok=True)
-    threshold = VAR_TYPE_THRESHOLDS[1]
+    threshold = VAR_TYPE_THRESHOLDS[0]
     idx_path_threshold = reduce(
         and_,
         (table[obs_count_column_name(band)] >= min_value for band, min_value in threshold.items()),
     )
     plot_lc_examples(table[idx_path_threshold], catalog, fig_path=examples_path, rng=0)
+
+    for t, tpa in cat.types_plot_all.items():
+        idx = reduce(
+            and_,
+            (table[obs_count_column_name(band)] >= min_value for band, min_value in tpa.threshold.items()),
+        )
+        bands = sorted(band for band, v in tpa.threshold.items() if v > 0)
+        objects = table[idx & (table['var_type'] == t)].to_records()
+        if tpa.as_is:
+            raise NotImplementedError
+        if tpa.folded:
+            folded_objects = np.array(
+                [fold_lc(obj, period_range=cat.periodic_types[t].range) for obj in objects]
+            )
+            lc_path = os.path.join(fig_path, f'{catalog}_{t}_folded')
+            os.makedirs(lc_path, exist_ok=True)
+            plot_all_lc(folded_objects, catalog, lc_path, bands=bands, ax_plot=plot_folded)
 
 
 def parse_args():
