@@ -6,3 +6,4 @@ pandas
 gatspy
 scipy
 george
+joblib
