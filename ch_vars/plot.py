@@ -14,7 +14,7 @@ import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from gatspy.periodic import LombScargleMultibandFast
+from gatspy.periodic import LombScargleMultiband, LombScargleMultibandFast
 from joblib import Memory
 
 from ch_vars.vsx import VSX_TYPE_MAP
@@ -140,7 +140,10 @@ OBS_COUNT_BINS = np.arange(0, 2000, 25)
 
 
 def fold_lc(obj, period_range):
-    lsmf = LombScargleMultibandFast(fit_period=True)
+    if obj['mjd'].size < 64:
+        lsmf = LombScargleMultiband(fit_period=True)
+    else:
+        lsmf = LombScargleMultibandFast(fit_period=True)
     period_range = period_range[0], min(period_range[1], np.ptp(obj['mjd']))
     lsmf.optimizer.period_range = period_range
     lsmf.fit(obj['mjd'], obj['mag'], obj['magerr'], obj['filter'])
@@ -162,7 +165,7 @@ def obs_count_column_name(band):
 
 
 def approx(lc, timescale=3) -> Optional[Callable]:
-    if lc.size < 10:
+    if lc['mjd'].item().size < 10:
         return None
     mean = np.average(lc['mag'], weights=lc['magerr']**-2)
     mag = lc['mag'] - mean
@@ -174,13 +177,6 @@ def approx(lc, timescale=3) -> Optional[Callable]:
         return gp.predict(mag, x, return_cov=False, return_var=False) + mean
 
     return f
-
-
-def update_lim(old, new):
-    if new[0] > old[0]:
-        old[0] = new[0]
-    if new[1] < old[1]:
-        old[1] = new[1]
 
 
 def plot_lc(ax, obj, *, bands):
@@ -198,14 +194,13 @@ def plot_lc(ax, obj, *, bands):
             ls='', marker='x', color=COLORS[band], alpha=0.3,
             label=BAND_NAMES[band],
         )
-        update_lim(ylim, ax.get_ylim())
         spline = approx(lc)
         if spline is None:
             continue
         t = np.linspace(lc['mjd'].min(), lc['mjd'].max(), 128)
         interp = spline(t)
         ax.plot(t, interp, '-', color=COLORS[band], label='')
-    ax.set_ylim(ylim)
+    ax.set_ylim(obj['mag'].item().max() + 2.0 * obj['magerr'].item().max(), obj['mag'].item().min() - 2.0 * obj['magerr'].item().max())
     ax.legend(loc='upper right')
 
 
@@ -238,7 +233,6 @@ def plot_folded(ax, obj, *, bands):
     ax.set_xlabel('phase')
     ax.set_ylabel('mag')
     ax.invert_yaxis()
-    ylim = [-np.inf, np.inf]
     for band, lc in lcs.items():
         for repeat in range(-1, 2):
             label = BAND_NAMES[band] if repeat == 0 else ''
@@ -247,7 +241,6 @@ def plot_folded(ax, obj, *, bands):
                 ls='', marker='x', color=COLORS[band],
                 label=label, alpha=0.1,
             )
-        update_lim(ylim, ax.set_ylim())
         spline = approx_periodic(lc)
         if spline is None:
             continue
@@ -255,7 +248,7 @@ def plot_folded(ax, obj, *, bands):
         interp = spline(ph)
         for repeat in range(-1, 2):
             ax.plot(ph + repeat, interp, '-', color=COLORS[band], label='')
-    ax.set_ylim(ylim)
+    ax.set_ylim(obj['mag'].item().max() + 2.0 * obj['magerr'].item().max(), obj['mag'].item().min() - 2.0 * obj['magerr'].item().max())
     ax.set_xlim([-0.2, 1.8])
     secax = ax.secondary_xaxis('top', functions=(lambda x: x * obj['period'], lambda x: x / obj['period']))
     secax.set_xlabel('Folded time, days')
@@ -294,12 +287,14 @@ def threshold_idx(table, threshold):
 
 
 class Plot:
-    def __init__(self, catalog, fig_path, cache_path=None):
+    def __init__(self, catalog, fig_path, cache_path=None, clear_cache=False):
         self.catalog_name = catalog
         self.cat = CATALOGS[self.catalog_name]
         self.fig_path = fig_path
         os.makedirs(self.fig_path, exist_ok=True)
         self.memory = Memory(location=cache_path)
+        if clear_cache:
+            self.memory.clear()
         self.fold_lc = self.memory.cache(fold_lc)
 
     def load_data(self, data_path):
@@ -497,6 +492,7 @@ def parse_args():
                         help='data root, could be local path or HTTP URL (URL IS BROKEN FOR VSX DUE TO AN ISSUE WITH PANDAS)')
     parser.add_argument('-f', '--fig', default='.', help='folder to save figures')
     parser.add_argument('--cache', default=None, help='directory to use as cache location')
+    parser.add_argument('--clear-cache', default=False, action='store_true', help='clear cache')
     args = parser.parse_args()
     return args
 
@@ -509,5 +505,5 @@ def main():
     os.makedirs(cli_args.fig, exist_ok=True)
 
     for catalog in cli_args.cat:
-        plot = Plot(catalog, fig_path=cli_args.fig, cache_path=cli_args.cache)
+        plot = Plot(catalog, fig_path=cli_args.fig, cache_path=cli_args.cache, clear_cache=cli_args.clear_cache)
         plot(data_path=cli_args.data)
