@@ -164,17 +164,20 @@ def obs_count_column_name(band):
     return f'obs_count_{band_name}'
 
 
-def approx(lc, timescale=3) -> Optional[Callable]:
-    if lc['mjd'].item().size < 10:
+def approx(lc, timescale=30) -> Optional[Callable]:
+    if lc['mjd'].size < 10:
         return None
-    mean = np.average(lc['mag'], weights=lc['magerr']**-2)
-    mag = lc['mag'] - mean
-    kernel = np.var(mag) * george.kernels.ExpSquaredKernel(timescale)
+    flux = np.power(10.0, -0.4 * lc['mag'])
+    fluxerr = 0.5 * (
+        np.power(10.0, -0.4 * (lc['mag'] - lc['magerr']))
+        - np.power(10.0, -0.4 * (lc['mag'] + lc['magerr']))
+    )
+    kernel = (10.0 * np.max(flux))**2 * george.kernels.ExpSquaredKernel(timescale)
     gp = george.GP(kernel)
-    gp.compute(lc['mjd'], lc['magerr'])
+    gp.compute(lc['mjd'], fluxerr)
 
     def f(x):
-        return gp.predict(mag, x, return_cov=False, return_var=False) + mean
+        return -2.5 * np.log10(gp.predict(flux, x, return_cov=False, return_var=False))
 
     return f
 
@@ -187,7 +190,6 @@ def plot_lc(ax, obj, *, bands):
     ax.set_xlabel('MJD')
     ax.set_ylabel('mag')
     ax.invert_yaxis()
-    ylim = [-np.inf, np.inf]
     for band, lc in lcs.items():
         ax.errorbar(
             lc['mjd'], lc['mag'], lc['magerr'],
@@ -421,7 +423,7 @@ class Plot:
 
         for type_idx, t in enumerate(var_types):
             positions = np.where(inverse_idx == type_idx)[0]
-            if n_per_type < positions.size:
+            if positions.size < n_per_type:
                 msg = f'n_per_type is {n_per_type} but there are only {positions.size} of objects of type {t}'
                 logging.warning(msg)
                 continue
@@ -430,7 +432,7 @@ class Plot:
 
             plot_lcs(
                 objects,
-                path=os.path.join(self.fig_path, f'{self.catalog_name}_{t}.png'),
+                path=os.path.join(examples_path, f'{self.catalog_name}_{t}.png'),
                 suptitle=f'{t} objects from {self.catalog_name}',
                 bands=bands,
                 ax_plot=plot_lc,
@@ -446,7 +448,7 @@ class Plot:
                 ).reshape(objects.shape)
                 plot_lcs(
                     folded_objects,
-                    path=os.path.join(self.fig_path, f'{self.catalog_name}_{t}_folded.png'),
+                    path=os.path.join(examples_path, f'{self.catalog_name}_{t}_folded.png'),
                     suptitle=f'{t} objects from {self.catalog_name}',
                     bands=bands,
                     ax_plot=plot_folded,
