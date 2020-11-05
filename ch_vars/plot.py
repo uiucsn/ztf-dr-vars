@@ -1,113 +1,21 @@
-import dataclasses
 import logging
 import os
 import re
 from argparse import ArgumentParser
-from copy import copy
 from functools import partial, reduce
 from itertools import chain
 from operator import and_
-from typing import Callable, Optional, Union
 
-import george
 import matplotlib; matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from gatspy.periodic import LombScargleMultiband, LombScargleMultibandFast
 from joblib import Memory
 
+from ch_vars.approx import *
+from ch_vars.catalogs import CATALOGS
+from ch_vars.common import str_to_array
 from ch_vars.vsx import VSX_TYPE_MAP
-
-
-@dataclasses.dataclass(frozen=True)
-class PeriodRange:
-    min_period: float = 30. / 3600.
-    max_period: float = np.inf
-
-    @property
-    def range(self):
-        return self.min_period, self.max_period
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class VarTypeColumn:
-    name: str
-    converter: Callable = str
-    skip_value: Union[str, re.Pattern, None] = None
-    map: Optional[Callable] = None
-
-    def __repr__(self):
-        return self.name
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class TypePlotAll:
-    threshold: dict = dataclasses.field(default_factory=lambda: {1: 50, 2: 50, 3: 50})
-    as_is: bool = False
-    folded: bool = False
-
-
-@dataclasses.dataclass(frozen=True, eq=False)
-class Catalog:
-    filename: str
-    id_column: str
-    var_type_column: VarTypeColumn
-    periodic_types: dict = dataclasses.field(default_factory=dict)
-    types_plot_all: dict = dataclasses.field(default_factory=dict)
-
-
-CATALOGS = {
-    'sdss-vars': Catalog(
-        filename='ztf-sdss-vars.csv.xz',
-        id_column='sdss_name',
-        var_type_column=VarTypeColumn('bhatti_vartype'),
-    ),
-    'sdss-candidates': Catalog(
-        filename='ztf-sdss.csv.xz',
-        id_column='sdss_name',
-        var_type_column=VarTypeColumn('segue_tags'),
-    ),
-    'asassn': Catalog(
-        filename='ztf-asassn.csv.xz',
-        id_column='asassn_name',
-        var_type_column=VarTypeColumn('asassn_type'),
-        periodic_types={
-            'M': PeriodRange(min_period=50),
-            'RRAB': PeriodRange(min_period=0.05, max_period=5),
-        }
-    ),
-    'vsx': Catalog(
-        filename='ztf-vsx.csv.xz',
-        id_column='vsx_oid',
-        var_type_column=VarTypeColumn(
-            'type',
-            converter=lambda s: s.split('/')[0],
-            skip_value=re.compile(r'[:|+]'),
-            map=lambda x: VSX_TYPE_MAP[x],
-        ),
-        periodic_types={
-            'Cepheid': PeriodRange(min_period=0.1, max_period=200),
-            'Eclipsing': PeriodRange(min_period=0.01, max_period=2000),
-            'Ellipsoidal': PeriodRange(min_period=0.01, max_period=1000),
-            'Heatbeat': PeriodRange(min_period=0.5),
-            'Mira': PeriodRange(min_period=50),
-            'R': PeriodRange(max_period=10),
-            'RS CVn': PeriodRange(min_period=10),
-            'RR Lyr': PeriodRange(min_period=0.05, max_period=5),
-            'ZZ Ceti': PeriodRange(max_period=0.1),
-            'γ Dor': PeriodRange(min_period=0.1, max_period=10),
-            'δ Sct': PeriodRange(max_period=5),
-        },
-        types_plot_all={
-            'Cepheid': TypePlotAll(threshold={1: 50, 2: 50, 3: 20}, folded=True),
-            'Ellipsoidal': TypePlotAll(threshold={1: 100, 2: 100, 3: 0}, folded=True),
-            'R': TypePlotAll(threshold={1: 100, 2: 100, 3: 0}, folded=True),
-            'RR Lyr': TypePlotAll(threshold={1: 50, 2: 50, 3: 50}, folded=True),
-            'δ Sct': TypePlotAll(threshold={1: 50, 2: 50, 3: 40}, folded=True),
-        },
-    ),
-}
 
 
 BAND_NAMES = {
@@ -139,47 +47,9 @@ MAGN_BINS = np.arange(15, 23, 0.5)
 OBS_COUNT_BINS = np.arange(0, 2000, 25)
 
 
-def fold_lc(obj, period_range):
-    if obj['mjd'].size < 64:
-        lsmf = LombScargleMultiband(fit_period=True)
-    else:
-        lsmf = LombScargleMultibandFast(fit_period=True)
-    period_range = period_range[0], min(period_range[1], np.ptp(obj['mjd']))
-    lsmf.optimizer.period_range = period_range
-    lsmf.fit(obj['mjd'], obj['mag'], obj['magerr'], obj['filter'])
-    period = lsmf.best_period
-    phase = obj['mjd'] % period / period
-    records = copy(obj.item()) + (phase, period,)
-    dtype = obj.dtype.descr + [('phase', object), ('period', float)]
-    folded = np.rec.fromrecords(records, dtype=dtype)
-    return folded
-
-
-def str_to_array(s, dtype=float):
-    return np.fromstring(s[1:-1], sep=',', dtype=dtype)
-
-
 def obs_count_column_name(band):
     band_name = BAND_NAMES[band]
     return f'obs_count_{band_name}'
-
-
-def approx(lc, timescale=30) -> Optional[Callable]:
-    if lc['mjd'].size < 10:
-        return None
-    flux = np.power(10.0, -0.4 * lc['mag'])
-    fluxerr = 0.5 * (
-        np.power(10.0, -0.4 * (lc['mag'] - lc['magerr']))
-        - np.power(10.0, -0.4 * (lc['mag'] + lc['magerr']))
-    )
-    kernel = (10.0 * np.max(flux))**2 * george.kernels.ExpSquaredKernel(timescale)
-    gp = george.GP(kernel)
-    gp.compute(lc['mjd'], fluxerr)
-
-    def f(x):
-        return -2.5 * np.log10(gp.predict(flux, x, return_cov=False, return_var=False))
-
-    return f
 
 
 def plot_lc(ax, obj, *, bands):
@@ -204,27 +74,6 @@ def plot_lc(ax, obj, *, bands):
         ax.plot(t, interp, '-', color=COLORS[band], label='')
     ax.set_ylim(obj['mag'].item().max() + 2.0 * obj['magerr'].item().max(), obj['mag'].item().min() - 2.0 * obj['magerr'].item().max())
     ax.legend(loc='upper right')
-
-
-def approx_periodic(lc, period=1.0) -> Optional[Callable]:
-    _, idx = np.unique(lc['phase'], return_index=True)
-    if idx.size < 10:
-        return None
-    phase = lc['phase'][idx]
-    mag = lc['mag'][idx]
-    magerr = lc['magerr'][idx]
-    mean = np.average(mag, weights=magerr**-2)
-    mag -= mean
-    kernel = george.kernels.ExpSine2Kernel(gamma=1.0, log_period=np.log(period))
-    # No fitting => no reason to freeze
-    # kernel.freeze_parameter('k2:log_period')
-    gp = george.GP(kernel)
-    gp.compute(phase, magerr)
-
-    def f(x):
-        return gp.predict(mag, x, return_cov=False, return_var=False) + mean
-
-    return f
 
 
 def plot_folded(ax, obj, *, bands):

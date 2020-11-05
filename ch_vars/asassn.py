@@ -1,5 +1,4 @@
 import importlib.resources
-import os
 
 from astropy.io import ascii
 

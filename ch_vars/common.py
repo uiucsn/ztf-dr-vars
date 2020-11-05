@@ -81,3 +81,7 @@ class JoinedVarType:
 
     def __repr__(self):
         return f'VarType {self.name} containing subtypes {", ".join(sorted(self.types))}'
+
+
+def str_to_array(s, dtype=float):
+    return np.fromstring(s[1:-1], sep=',', dtype=dtype)

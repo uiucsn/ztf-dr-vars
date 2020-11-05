@@ -1,1 +1,2 @@
 include ch_vars/data/asassn-catalog-20191020.csv.bz2
+include ch_vars/data/good_vsx_folded/*.dat
