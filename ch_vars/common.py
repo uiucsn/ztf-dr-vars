@@ -1,5 +1,6 @@
 import logging
 import re
+from contextlib import contextmanager
 
 import numpy as np
 from clickhouse_driver import Client
@@ -85,3 +86,14 @@ class JoinedVarType:
 
 def str_to_array(s, dtype=float):
     return np.fromstring(s[1:-1], sep=',', dtype=dtype)
+
+
+@contextmanager
+def numpy_print_options(**kwargs):
+    current_options = np.get_printoptions()
+    options = current_options.copy()
+    options.update(kwargs)
+    try:
+        yield np.set_printoptions(**options)
+    finally:
+        np.set_printoptions(**current_options)

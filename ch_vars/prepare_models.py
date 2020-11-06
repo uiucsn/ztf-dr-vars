@@ -1,6 +1,7 @@
 import importlib.resources
 import logging
 import os
+import sys
 from functools import partial
 
 import astropy.table
@@ -14,7 +15,7 @@ from joblib import Memory
 
 from ch_vars.approx import approx_periodic, fold_lc
 from ch_vars.catalogs import CATALOGS
-from ch_vars.common import str_to_array
+from ch_vars.common import str_to_array, numpy_print_options
 
 
 EXTRAGALACTIC_DISTANCE = 1e6 * u.pc
@@ -142,8 +143,6 @@ class PrepareVsxFolded:
             for folded, egr in zip(folded_objects, vsx_data['Egr']):
                 for band in bands:
                     idx = folded['filter'].item() == band
-                    folded['mag'] -= self.extinction_coeff[band] * egr
-
                     lc = {
                         'phase': folded['phase'].item()[idx],
                         'mag': folded['mag'].item()[idx],
@@ -153,7 +152,8 @@ class PrepareVsxFolded:
                     models[band].append(m)
             for band in bands:
                 df[f'mag_folded_model_{BANDS[band]}'] = models[band]
-            df.to_csv(os.path.join(output_dir, f'{t}.csv'))
+            with numpy_print_options(threshold=sys.maxsize):
+                df.to_csv(os.path.join(output_dir, f'{t}.csv.bz2'))
 
 
 def prepare_vsx_folded():
