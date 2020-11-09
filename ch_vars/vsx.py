@@ -204,3 +204,4 @@ U Geminorum-type variables, quite often called dwarf novae. They are close binar
 
 
 VSX_TYPE_MAP = {t: vsx_type.name for vsx_type in VSX_TYPES for t in vsx_type.types}
+VSX_JOINED_TYPES = {vsx_type.name: vsx_type for vsx_type in VSX_TYPES}
