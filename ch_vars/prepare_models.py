@@ -254,6 +254,8 @@ class VsxFoldedModel:
                     f'START_EVENT: {i_event}\n'
                     f'NROW: {n_approx} RA: {row["RAJ2000"]} DEC: {row["DEJ2000"]}\n'
                     f'PARVAL: {vsx_oid},{row.period:.6g}\n'
+                    # This option could lead to infinite loop if there is a sky position in a survy not covered by any
+                    # LCLIB entry
                     # f'ANGLEMATCH_b: {self.max_abs_b}\n'  # CHECKME
                 )
                 for i in range(n_approx):
