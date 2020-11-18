@@ -14,7 +14,7 @@ from joblib import Memory
 
 from ch_vars.approx import *
 from ch_vars.catalogs import CATALOGS
-from ch_vars.common import str_to_array
+from ch_vars.common import greek_to_latin, str_to_array
 from ch_vars.vsx import VSX_TYPE_MAP
 
 
@@ -85,12 +85,12 @@ def plot_folded(ax, obj, *, bands):
     ax.set_ylabel('mag')
     ax.invert_yaxis()
     for band, lc in lcs.items():
+        alpha = 0.3 if BAND_NAMES[band] == 'i' else 0.1
         for repeat in range(-1, 2):
-            label = BAND_NAMES[band] if repeat == 0 else ''
             ax.errorbar(
                 lc['phase'] + repeat, lc['mag'], lc['magerr'],
                 ls='', marker='x', color=COLORS[band],
-                label=label, alpha=0.1,
+                alpha=alpha,
             )
         spline = approx_periodic(lc)
         if spline is None:
@@ -98,12 +98,13 @@ def plot_folded(ax, obj, *, bands):
         ph = np.linspace(0, 1.0, 128)
         interp = spline(ph)
         for repeat in range(-1, 2):
-            ax.plot(ph + repeat, interp, '-', color=COLORS[band], label='')
+            label = BAND_NAMES[band] if repeat == 0 else ''
+            ax.plot(ph + repeat, interp, '-', color=COLORS[band], label=label)
     ax.set_ylim(obj['mag'].item().max() + 2.0 * obj['magerr'].item().max(), obj['mag'].item().min() - 2.0 * obj['magerr'].item().max())
     ax.set_xlim([-0.2, 1.8])
     secax = ax.secondary_xaxis('top', functions=(lambda x: x * obj['period'], lambda x: x / obj['period']))
     secax.set_xlabel('Folded time, days')
-    ax.legend(loc='upper right')
+    ax.legend(loc='upper right', framealpha=1)
 
 
 def plot_lcs(objs, *, path, suptitle, bands, ax_plot=plot_lc):
