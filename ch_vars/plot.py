@@ -14,28 +14,9 @@ from joblib import Memory
 
 from ch_vars.approx import *
 from ch_vars.catalogs import CATALOGS
-from ch_vars.common import greek_to_latin, str_to_array
+from ch_vars.common import BAND_NAMES, COLORS, str_to_array
 from ch_vars.vsx import VSX_TYPE_MAP
 
-
-BAND_NAMES = {
-    1: 'g',
-    2: 'r',
-    3: 'i',
-}
-
-COLORS = {
-    1: 'green',
-    2: 'red',
-    3: 'black',
-}
-
-
-BAND_WAVELENGTHS = {
-    1: 4722.74,
-    2: 6339.61,
-    3: 7886.13,
-}
 
 VAR_TYPE_THRESHOLDS = (
     {1: 100, 2: 100, 3: 0},

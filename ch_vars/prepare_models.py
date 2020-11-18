@@ -1,6 +1,7 @@
 import importlib.resources
 import logging
 import os
+import re
 import sys
 from argparse import ArgumentParser
 from datetime import datetime
@@ -10,14 +11,14 @@ import astropy.table
 import astropy.units as u
 import numpy as np
 import pandas as pd
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import Distance, SkyCoord
 from astroquery.vizier import Vizier
 from dustmaps import bayestar
 from joblib import Memory
 
 from ch_vars.approx import approx_periodic, fold_lc
 from ch_vars.catalogs import CATALOGS
-from ch_vars.common import str_to_array, numpy_print_options
+from ch_vars.common import BAND_NAMES, COLORS, greek_to_latin, str_to_array, numpy_print_options
 from ch_vars.vsx import VSX_JOINED_TYPES
 
 
@@ -25,9 +26,6 @@ NOW = datetime.now()
 
 
 EXTRAGALACTIC_DISTANCE = 1e6 * u.pc
-
-
-BANDS = {1: 'g', 2: 'r', 3: 'i'}
 
 
 def get_ids(package):
@@ -153,6 +151,7 @@ class VsxFoldedModel:
             self.vsx_data['RAJ2000'].data.data,
             self.vsx_data['DEJ2000'].data.data,
         )
+        self.vsx_data['distmod'] = Distance(self.vsx_data['distance'], unit=u.pc).distmod
         self.vsx_data['Egr'] = self.data.get_egr(
             self.vsx_data['RAJ2000'].data.data,
             self.vsx_data['DEJ2000'].data.data,
@@ -180,7 +179,7 @@ class VsxFoldedModel:
                 self.extinction[i][band] = self.data.extinction_coeff[band] * egr
 
     def model_column(self, band):
-        return f'mag_folded_model_{BANDS[band]}'
+        return f'mag_folded_model_{BAND_NAMES[band]}'
 
     def with_approxed(self, n_approx, endpoint=False):
         phase = np.linspace(0.0, 1.0, n_approx, endpoint=endpoint)
@@ -188,15 +187,41 @@ class VsxFoldedModel:
         df['phase_model'] = [phase] * df.shape[0]
         df['folded_time_model'] = [phase * period for period in df['period']]
         for band in self.bands:
-            df[self.model_column(band)] = pd.Series({i: self.approx_funcs[i][band](phase) - self.extinction[i][band]
-                                                     for i in df.index})
+            df[self.model_column(band)] = pd.Series(
+                {i: self.approx_funcs[i][band](phase) - self.extinction[i][band]  # - df.loc[i].distmod
+                 for i in df.index}
+            )
         return df
+
+    def plots(self, path, n_approx=128):
+        import matplotlib; matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        path = os.path.join(path, f'abs_mag_hist_{self.var_type}.png')
+        df = self.with_approxed(n_approx)
+
+        fig, ax = plt.subplots()
+        fig.suptitle(self.var_type)
+        ax.set_xlabel(r'Mean magnitude')
+        for band in self.bands:
+            mean = df[self.model_column(band)].apply(np.mean)
+            ax.hist(mean, histtype='step', label=BAND_NAMES[band], color=COLORS[band])
+        ax.legend()
+        fig.savefig(path)
+        plt.close(fig)
 
     def to_csv(self, path, n_approx=128):
         if os.path.isdir(path):
             path = os.path.join(path, f'{self.var_type}.csv.bz2')
         with numpy_print_options(threshold=sys.maxsize):
-            self.with_approxed(n_approx).to_csv(path)
+            self.with_approxed(n_approx, endpoint=False).to_csv(path)
+
+    @property
+    def _lclib_model_name(self):
+        t = self.var_type.upper()
+        t = greek_to_latin(t)
+        t = re.sub(r'[^A-Z0-9]', '', t)
+        return f'ZTFDR3VSX{t}'
 
     def to_lclib(self, path, n_approx=128):
         if os.path.isdir(path):
@@ -207,8 +232,8 @@ class VsxFoldedModel:
         with open(path, 'w') as fh:
             fh.write(
                 'SURVEY: ZTF\n'
-                f'FILTERS: {"".join(BANDS[band] for band in self.bands)}\n'
-                f'MODEL: ZTFDR3VSX{self.var_type.upper()}\n'  # CHECKME
+                f'FILTERS: {"".join(BAND_NAMES[band] for band in self.bands)}\n'
+                f'MODEL: {self._lclib_model_name}\n'  # CHECKME
                 'MODEL_PARNAMES: VSXOID,PERIOD\n'  # CHECKME
                 'RECUR_CLASS: RECUR-PERIODIC\n'
                 f'NEVENT: {df.shape[0]}\n'
@@ -229,7 +254,7 @@ class VsxFoldedModel:
                     f'START_EVENT: {i_event}\n'
                     f'NROW: {n_approx} RA: {row["RAJ2000"]} DEC: {row["DEJ2000"]}\n'
                     f'PARVAL: {vsx_oid},{row.period:.6g}\n'
-                    f'ANGLEMATCH_b: {self.max_abs_b}\n'  # CHECKME
+                    # f'ANGLEMATCH_b: {self.max_abs_b}\n'  # CHECKME
                 )
                 for i in range(n_approx):
                     time = row['folded_time_model'][i]
@@ -254,12 +279,15 @@ def prepare_vsx_folded(cli_args):
             model.to_csv(cli_args.output)
         if cli_args.lclib:
             model.to_lclib(cli_args.output)
+        if cli_args.plots:
+            model.plots(cli_args.output, n_approx=32)
 
 
 def parse_args():
     parser = ArgumentParser('Create Gaussian Process approximated models')
-    parser.add_argument('--csv', action='store_true', help='save into .csv.bz2 files')
+    parser.add_argument('--csv', action='store_true', help='save into .csv.bz2 file')
     parser.add_argument('--lclib', action='store_true', help='save in SNANA LCLIB format')
+    parser.add_argument('--plots', action='store_true', help='save statistics plots')
     parser.add_argument('-d', '--data', default='https://static.rubin.science/',
                         help='data root, could be local path or HTTP URL (URL IS BROKEN FOR VSX DUE TO AN ISSUE WITH PANDAS)')
     parser.add_argument('--cache', default=None, help='directory to use as cache location')

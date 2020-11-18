@@ -6,6 +6,26 @@ import numpy as np
 from clickhouse_driver import Client
 
 
+BAND_NAMES = {
+    1: 'g',
+    2: 'r',
+    3: 'i',
+}
+
+COLORS = {
+    1: 'green',
+    2: 'red',
+    3: 'black',
+}
+
+
+BAND_WAVELENGTHS = {
+    1: 4722.74,
+    2: 6339.61,
+    3: 7886.13,
+}
+
+
 NP_TYPE_TO_CH = {
     np.object_: 'String',
     np.str_: 'String',
@@ -97,3 +117,17 @@ def numpy_print_options(**kwargs):
         yield np.set_printoptions(**options)
     finally:
         np.set_printoptions(**current_options)
+
+
+class GreekToLatin:
+    greek = 'ΑΆΒΓΔΕΈΖΗΉΙΊΪΚΛΜΝΟΌΠΡΣΤΥΎΫΦΧΩΏαάβγδεέζηήιίϊΐκλμνοόπρσςτυύϋΰφχωώ'
+    latin = 'AABGDEEZHHIIIKLMNOOPRSTYYYFXWWaabgdeezhhiiiiklmnooprsstuuuufxww'
+
+    def __init__(self):
+        self.table = str.maketrans(self.greek, self.latin)
+
+    def __call__(self, s):
+        return s.translate(self.table)
+
+
+greek_to_latin = GreekToLatin()
