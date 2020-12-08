@@ -7,6 +7,7 @@ setup(
     entry_points={'console_scripts': [
         'plot-var-stats = ch_vars.plot:main',
         'prepare = ch_vars.prepare_models:main',
+        'cut-vsx = ch_vars.prepare_training_data:main',
         'put-vsx = ch_vars.vsx:main',
         'put-asassn-var = ch_vars.asassn:main',
         'put-sdss-82-candidates = ch_vars.sdss_candidates:main',
