@@ -5,8 +5,9 @@ import re
 import sys
 from argparse import ArgumentParser
 from datetime import datetime
-from functools import partial
+from functools import lru_cache, partial
 
+import astropy.constants as const
 import astropy.table
 import astropy.units as u
 import numpy as np
@@ -15,10 +16,15 @@ from astropy.coordinates import Distance, SkyCoord
 from astroquery.vizier import Vizier
 from dustmaps import bayestar
 from joblib import Memory
+from pyvo.dal import TAPService
+from scipy.integrate import simps
+from scipy.optimize import least_squares
 
 from ch_vars.approx import approx_periodic, fold_lc
 from ch_vars.catalogs import CATALOGS
-from ch_vars.common import BAND_NAMES, COLORS, greek_to_latin, str_to_array, numpy_print_options
+from ch_vars.common import BAND_NAMES, COLORS, greek_to_latin, str_to_array, numpy_print_options, LSST_BANDS,\
+    LSST_COLORS
+from ch_vars.data import lsst_filter, ztf_filter
 from ch_vars.vsx import VSX_JOINED_TYPES
 
 
@@ -43,7 +49,8 @@ class _DustMap:
     bayestar_r = {1: 3.518, 2: 2.617, 3: 1.971}
 
     def __init__(self, cache_dir):
-        bayestar.config['data_dir'] = cache_dir
+        if cache_dir is not None:
+            bayestar.config['data_dir'] = cache_dir
         bayestar.fetch(version=self.bayestar_version)
         self.bayestar = bayestar.BayestarQuery(version=self.bayestar_version)
 
@@ -87,18 +94,101 @@ def get_vsx_by_oids(vsx_oids):
     return table
 
 
-def get_distance(ra, dec, search_radius=1*u.arcsec):
-    vizier = Vizier()
-    coords = SkyCoord(ra=ra, dec=dec, unit=u.deg)
-    response = vizier.query_region(coords, radius=search_radius, catalog='I/347/gaia2dis')
-    distance = u.Quantity([EXTRAGALACTIC_DISTANCE] * coords.size)
-    if not response:
-        return distance
-    table = response[0]
-    coord_idx, table_idx = np.unique(table['_q'] - 1, return_inverse=True)
-    for i, coord_i in enumerate(coord_idx):
-        distance[coord_i] = table[table_idx == i][0]['rest'] * table['rest'].unit
-    return distance
+def get_distance(ra, dec, search_radius_arcsec=1):
+    tap = TAPService('https://dc.zah.uni-heidelberg.de/tap')
+    distance = []
+    for ra_deg, dec_deg in zip(ra, dec):
+        # source_id, ra, dec, r_med_geo, r_lo_geo, r_hi_geo, r_med_photogeo, r_lo_photogeo, r_hi_photogeo
+        response = tap.search(f'''
+            SELECT distance(ra, dec, {ra_deg}, {dec_deg}) as d, r_med_geo, r_med_photogeo
+                FROM gedr3dist.main
+                JOIN gaia.edr3lite USING (source_id)
+                WHERE distance(ra, dec, {ra_deg}, {dec_deg}) < {search_radius_arcsec / 3600.0}
+        ''')
+        if not response:
+            distance.append(EXTRAGALACTIC_DISTANCE)
+            continue
+        row = response.getrecord(np.argmin(response['d']))
+        distance.append(row['r_med_photogeo'].item() * u.pc)
+    return u.Quantity(distance)
+
+
+def fix_negative(a):
+    index = np.arange(a.size, dtype=a.dtype)
+    i = a < 0
+    a[i] = np.interp(index[i], index[~i], a[~i])
+
+
+def mean_reduce(a, factor=10):
+    if a.size % factor != 0:
+        a = np.concatenate([a, np.full(factor - a.size % factor, a[-1])])
+    mean = a.reshape(-1, factor).mean(axis=1)
+    return mean
+
+
+@lru_cache()
+def ztf_band_transmission(band: int):
+    filename = f'ztf_{BAND_NAMES[band]}_band.csv'
+    with importlib.resources.open_binary(ztf_filter, filename) as fh:
+        lmbd, r = np.genfromtxt(fh, delimiter=',', unpack=True)
+    if lmbd[0] > lmbd[-1]:
+        lmbd = lmbd[::-1]
+        r = r[::-1]
+    lmbd *= 1e-7  # from nm to cm
+    r *= 1e-2  # from percent to fraction
+
+    fix_negative(r)
+
+    lmbd = mean_reduce(lmbd)
+    r = mean_reduce(r)
+    norm = simps(x=lmbd, y=r)
+    return lmbd, r, norm
+
+
+@lru_cache()
+def lsst_band_transmission(band: str):
+    filename = f'lsst_total_{band.lower()}.dat'
+    with importlib.resources.open_binary(lsst_filter, filename) as fh:
+        lmbd, r = np.genfromtxt(fh, delimiter=' ', comments='#', unpack=True)
+
+    lmbd *= 1e-7  # from nm to cm
+
+    lmbd = mean_reduce(lmbd)
+    r = mean_reduce(r)
+
+    norm = simps(x=lmbd, y=r)
+    return lmbd, r, norm
+
+
+HC_K = const.h.cgs.value * const.c.cgs.value / const.k_B.cgs.value
+
+
+def bb_mag(transmission, m0, temperature):
+    lmbd, r, norm = transmission
+    flux = simps(
+        x=lmbd,
+        y=r / (lmbd**5 * np.expm1(HC_K / (lmbd * temperature))),
+    )
+    return m0 - 2.5 * np.log10(flux / norm)
+
+
+def fit_temperature(curves):
+    some_band, some_curve = next(iter(curves.items()))
+    x = []
+    temp_init = 6000.0
+    m0_init = some_curve[0] - bb_mag(ztf_band_transmission(some_band), 0.0, temp_init)
+    x0 = [m0_init, temp_init]
+    for i in range(some_curve.size):
+        result = least_squares(
+            lambda x: [bb_mag(ztf_band_transmission(band), x[0], x[1]) - curve[i]
+                       for band, curve in curves.items()],
+            x0=x0,
+            bounds=([-np.inf, 3000], [np.inf, 10000]),
+        )
+        assert result.success
+        x.append(result.x)
+    m0, t = np.array(x).T
+    return m0, t
 
 
 class VsxDataGetter:
@@ -107,7 +197,10 @@ class VsxDataGetter:
     def __init__(self, data_dir, cache_dir, type_ids):
         self.cat = CATALOGS['vsx']
         self.memory = Memory(location=cache_dir)
-        dustmaps_cache_dir = os.path.join(cache_dir, 'dustmaps')
+        if cache_dir is None:
+            dustmaps_cache_dir = None
+        else:
+            dustmaps_cache_dir = os.path.join(cache_dir, 'dustmaps')
         self.get_egr = partial(self.memory.cache(beyestar_get), cache_dir=dustmaps_cache_dir)
         self.extinction_coeff = DustMap.bayestar_r
         self.vizier = Vizier()
@@ -120,6 +213,7 @@ class VsxDataGetter:
         self.fold_lc = self.memory.cache(fold_lc)
         self.get_vsx_by_oids = self.memory.cache(get_vsx_by_oids)
         self.get_distance = self.memory.cache(get_distance)
+        self.fit_temperature = self.memory.cache(fit_temperature)
 
         self.type_ids = type_ids.copy()
         self.ztf_data = self.get_ztf_data(self.all_ids)
@@ -151,6 +245,7 @@ class VsxFoldedModel:
             self.vsx_data['RAJ2000'].data.data,
             self.vsx_data['DEJ2000'].data.data,
         )
+        self.vsx_data = self.vsx_data[self.vsx_data['distance'] != EXTRAGALACTIC_DISTANCE]
         self.vsx_data['distmod'] = Distance(self.vsx_data['distance'], unit=u.pc).distmod
         self.vsx_data['Egr'] = self.data.get_egr(
             self.vsx_data['RAJ2000'].data.data,
@@ -167,7 +262,16 @@ class VsxFoldedModel:
         self.df['period'] = [folded['period'] for folded in self.folded_objects]
         self.approx_funcs = {i: {} for i in self.df.index}
         self.extinction = {i: {} for i in self.df.index}
-        for i, folded, egr in zip(self.df.index, self.folded_objects, self.vsx_data['Egr']):
+        for i, folded, egr, distmod in zip(self.df.index, self.folded_objects, self.vsx_data['Egr'], self.vsx_data['distmod']):
+            # if var_type == 'Cepheid':
+            #     mean_m_g = np.mean(folded['mag'].item()[folded['filter'].item() == 1])
+            #     # https://arxiv.org/pdf/0707.3144.pdf
+            #     Mv = -3.932 - 2.819 * (np.log10(folded['period']) - 1.0)
+            #     mv = Mv + distmod
+            #     Av = mean_m_g - mv
+            #     if Av > 0.0:
+            #         eBV = Av / 3.1
+            #         egr = eBV / 0.981
             for band in self.bands:
                 idx = folded['filter'].item() == band
                 lc = {
@@ -181,24 +285,35 @@ class VsxFoldedModel:
     def model_column(self, band):
         return f'mag_folded_model_{BAND_NAMES[band]}'
 
-    def with_approxed(self, n_approx, endpoint=False):
+    def lsst_model_column(self, band):
+        return f'mag_folded_model_lsst_{band}'
+
+    def with_approxed(self, n_approx, endpoint=False, max_egr=np.inf):
         phase = np.linspace(0.0, 1.0, n_approx, endpoint=endpoint)
-        df = self.df.copy(deep=True)
+        idx = self.df['Egr'] < max_egr
+        df = self.df[idx].copy(deep=True)
         df['phase_model'] = [phase] * df.shape[0]
         df['folded_time_model'] = [phase * period for period in df['period']]
         for band in self.bands:
             df[self.model_column(band)] = pd.Series(
-                {i: self.approx_funcs[i][band](phase) - self.extinction[i][band]  # - df.loc[i].distmod
+                {i: self.approx_funcs[i][band](phase) - self.extinction[i][band] - df.loc[i].distmod
                  for i in df.index}
+            )
+        m0_temp = np.array([
+            self.data.fit_temperature({band: df.loc[i][self.model_column(band)] for band in self.bands})
+            for i in df.index
+        ])
+        df['temperature'] = pd.Series({i: x[1] for i, x in zip(df.index, m0_temp)})
+        for lsst_band in LSST_BANDS:
+            df[self.lsst_model_column(lsst_band)] = pd.Series(
+                {i: np.array([bb_mag(lsst_band_transmission(lsst_band), m0, temp) for m0, temp in x.T])
+                 for i, x in zip(df.index, m0_temp)}
             )
         return df
 
-    def plots(self, path, n_approx=128):
+    def plot_mean_hist(self, df, path):
         import matplotlib; matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-
-        path = os.path.join(path, f'abs_mag_hist_{self.var_type}.png')
-        df = self.with_approxed(n_approx)
 
         fig, ax = plt.subplots()
         fig.suptitle(self.var_type)
@@ -210,11 +325,66 @@ class VsxFoldedModel:
         fig.savefig(path)
         plt.close(fig)
 
-    def to_csv(self, path, n_approx=128):
+    def plot_lcs(self, df, path):
+        import matplotlib; matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        os.makedirs(path, exist_ok=True)
+
+        for i, row in df.iterrows():
+            fig, ax = plt.subplots()
+            fig.suptitle(f'{self.var_type} : {i}')
+            ax.set_xlabel(r'phase')
+            ax.set_xlim([0, 1])
+            ax.set_ylabel(r'magnitude')
+            ax.invert_yaxis()
+
+            idx_data = np.isin(row['filter'], self.bands)
+            phase_data = row['mjd'][idx_data] % row['period'] / row['period']
+            mag_data = (
+                row['mag'][idx_data]
+                - np.array([self.extinction[i][band] for band in row['filter'][idx_data]])
+                - row['distmod']
+            )
+            color_data = np.vectorize(COLORS.get)(row['filter'][idx_data])
+            ax.scatter(phase_data, mag_data, color=color_data, alpha=0.2, s=4)
+
+            for band in self.bands:
+                ax.plot(
+                    row['phase_model'],
+                    row[self.model_column(band)],
+                    '--',
+                    lw=1,
+                    color=COLORS[band],
+                    label=f'ZTF {BAND_NAMES[band]}'
+                )
+
+            for lsst_band in LSST_BANDS:
+                ax.plot(
+                    row['phase_model'],
+                    row[self.lsst_model_column(lsst_band)],
+                    '-',
+                    lw=2,
+                    color=LSST_COLORS[lsst_band],
+                    label=f'LSST {lsst_band}'
+                )
+
+            ax.legend(bbox_to_anchor=(1.05, 1.0), loc='upper left')
+            fig.tight_layout()
+            plt.savefig(os.path.join(path, f'{i}.png'), dpi=300)
+            plt.close(fig)
+
+    def plots(self, path, n_approx=128):
+        os.makedirs(path, exist_ok=True)
+        df = self.with_approxed(n_approx, endpoint=True)
+        self.plot_mean_hist(df, os.path.join(path, f'abs_mag_hist_{self.var_type}.png'))
+        self.plot_lcs(df, os.path.join(path, f'vsx_{self.var_type}_approxed'))
+
+    def to_csv(self, path, n_approx=128, max_egr=np.inf):
         if os.path.isdir(path):
             path = os.path.join(path, f'{self.var_type}.csv.bz2')
         with numpy_print_options(threshold=sys.maxsize):
-            self.with_approxed(n_approx, endpoint=False).to_csv(path)
+            self.with_approxed(n_approx, endpoint=False, max_egr=max_egr).to_csv(path)
 
     @property
     def _lclib_model_name(self):
@@ -223,11 +393,11 @@ class VsxFoldedModel:
         t = re.sub(r'[^A-Z0-9]', '', t)
         return f'ZTFDR3VSX{t}'
 
-    def to_lclib(self, path, n_approx=128):
+    def to_lclib(self, path, n_approx=128, max_egr=np.inf):
         if os.path.isdir(path):
             path = os.path.join(path, f'{self.var_type}.lclib')
 
-        df = self.with_approxed(n_approx, endpoint=True)
+        df = self.with_approxed(n_approx, endpoint=True, max_egr=max_egr)
 
         with open(path, 'w') as fh:
             fh.write(
@@ -278,22 +448,24 @@ def prepare_vsx_folded(cli_args):
     for var_type, ids in good_ids.items():
         model = VsxFoldedModel(data_getter, var_type, ids)
         if cli_args.csv:
-            model.to_csv(cli_args.output)
+            model.to_csv(cli_args.output, max_egr=cli_args.maxegr)
         if cli_args.lclib:
-            model.to_lclib(cli_args.output)
+            model.to_lclib(cli_args.output, max_egr=cli_args.maxegr)
         if cli_args.plots:
-            model.plots(cli_args.output, n_approx=32)
+            model.plots(cli_args.output)
 
 
 def parse_args():
     parser = ArgumentParser('Create Gaussian Process approximated models')
     parser.add_argument('--csv', action='store_true', help='save into .csv.bz2 file')
     parser.add_argument('--lclib', action='store_true', help='save in SNANA LCLIB format')
-    parser.add_argument('--plots', action='store_true', help='save statistics plots')
+    parser.add_argument('--plots', action='store_true', help='plot figures')
     parser.add_argument('-d', '--data', default='https://static.rubin.science/',
                         help='data root, could be local path or HTTP URL (URL IS BROKEN FOR VSX DUE TO AN ISSUE WITH PANDAS)')
     parser.add_argument('--cache', default=None, help='directory to use as cache location')
     parser.add_argument('-o', '--output', default='.', help='directory to save models')
+    parser.add_argument('--maxegr', default=np.inf, type=float,
+                        help='filter objects with E_gr larger or equal than given')
     args = parser.parse_args()
     return args
 

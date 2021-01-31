@@ -9,3 +9,4 @@ george
 joblib
 astroquery
 dustmaps
+pyvo

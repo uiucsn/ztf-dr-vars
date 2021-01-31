@@ -6,6 +6,17 @@ import numpy as np
 from clickhouse_driver import Client
 
 
+LSST_BANDS = tuple('ugrizY')
+
+LSST_COLORS = {
+    'u': '#7E81EA',
+    'g': '#9B83CD',
+    'r': '#A483C1',
+    'i': '#B783AB',
+    'z': '#CA8395',
+    'Y': '#DC8381',
+}
+
 BAND_NAMES = {
     1: 'g',
     2: 'r',
