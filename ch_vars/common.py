@@ -142,3 +142,20 @@ class GreekToLatin:
 
 
 greek_to_latin = GreekToLatin()
+
+
+def nearest(a, v):
+    """Search nearest to v elements of sorted a"""
+    a = np.asarray(a)
+    v = np.asarray(v)
+
+    idx = np.empty((2,) + v.shape, dtype=np.int_)
+    idx[0] = np.searchsorted(a, v)
+    idx[1] = idx[0] + 1
+    idx[1, idx[1] == a.size] = a.size - 1
+
+    distance = np.abs(a[idx] - v)
+    left_or_right = np.argmin(distance, axis=0)
+
+    nearest_idx = idx[(left_or_right,) + tuple(np.indices(v.shape))]
+    return nearest_idx

@@ -12,18 +12,19 @@ import astropy.table
 import astropy.units as u
 import numpy as np
 import pandas as pd
-from astropy.coordinates import Distance, SkyCoord
+from astropy.coordinates import Distance, SkyCoord, Galactocentric, ICRS
 from astroquery.vizier import Vizier
 from dustmaps import bayestar
 from joblib import Memory
 from pyvo.dal import TAPService
 from scipy.integrate import simps
 from scipy.optimize import least_squares
+from scipy import stats
 
 from ch_vars.approx import approx_periodic, fold_lc
 from ch_vars.catalogs import CATALOGS
 from ch_vars.common import BAND_NAMES, COLORS, greek_to_latin, str_to_array, numpy_print_options, LSST_BANDS,\
-    LSST_COLORS
+    LSST_COLORS, nearest
 from ch_vars.data import lsst_filter, ztf_filter
 from ch_vars.vsx import VSX_JOINED_TYPES
 
@@ -189,6 +190,72 @@ def fit_temperature(curves):
         x.append(result.x)
     m0, t = np.array(x).T
     return m0, t
+
+
+class GalaxyDensity:
+    # Juric et al, 2008, Table 10
+    # https://iopscience.iop.org/article/10.1086/523619/pdf
+    sun_rho_kpc = 8
+    sun_rho = sun_rho_kpc * u.kpc
+    sun_z_kpc = 0.024
+    sun_z = sun_z_kpc * u.kpc
+    l_thin_kpc = 2.6
+    h_thin_kpc = 0.3
+    dens_thick_to_thin = 0.12
+    l_thick_kpc = 3.6
+    h_thick_kpc = 0.9
+    dens_halo_to_thin = 0.0051
+    ellipticity_halo = 0.64
+    power_order_halo = 2.77
+
+    rho_min_kpc = 1
+    rho_max_kpc = 20
+    z_min_kpc = -10
+    z_max_kpc = 10
+
+    def __init__(self, n_grid=2048):
+        self.rho, self.z = np.meshgrid(
+            np.linspace(self.rho_max_kpc, self.rho_min_kpc, n_grid),
+            np.linspace(self.z_min_kpc, self.z_max_kpc, n_grid)
+        )
+        self.dens_grid = self.dens(self.rho, 0.0, self.z)
+        self.dens_flat_cum = np.cumsum(self.dens_grid)
+        self.dens_flat_cum /= self.dens_flat_cum[-1]
+
+    def _disk_dens(self, rho, phi, z, l, h):
+        return np.exp((self.sun_rho_kpc - rho) / l - np.abs(z) / h)
+
+    def thin_disk_dens(self, rho, phi, z):
+        return self._disk_dens(rho, phi, z, l=self.l_thin_kpc, h=self.h_thin_kpc)
+
+    def thick_disk_dens(self, rho, phi, z):
+        return self.dens_thick_to_thin * self._disk_dens(rho, phi, z, l=self.l_thick_kpc, h=self.h_thick_kpc)
+
+    def halo_dens(self, rho, phi, z):
+        return (self.dens_halo_to_thin
+                * np.power(self.sun_rho_kpc / np.hypot(rho, z / self.ellipticity_halo), self.power_order_halo))
+
+    def dens(self, rho, phi, z):
+        return self.thin_disk_dens(rho, phi, z) + self.thick_disk_dens(rho, phi, z) + self.halo_dens(rho, phi, z)
+
+    def sample_gal_cyl(self, shape=(), rng=None):
+        random_rng = np.random.default_rng(rng)
+        r = random_rng.random(size=shape)
+        idx = nearest(self.dens_flat_cum, r)
+        rho = self.rho.reshape(-1)[idx]
+        z = self.z.reshape(-1)[idx]
+        phi = random_rng.uniform(0, 2*np.pi, size=shape)
+        return rho, phi, z
+
+    def eq_from_gal_cyl(self, rho, phi, z):
+        x = np.cos(phi) * rho
+        y = np.sin(phi) * rho
+        gc = Galactocentric(x=x*u.kpc, y=y*u.kpc, z=z*u.kpc, z_sun=self.sun_z, galcen_distance=self.sun_rho)
+        eq = gc.transform_to(ICRS())
+        return eq
+
+    def sample_eq(self, shape=(), rng=None):
+        return self.eq_from_gal_cyl(*self.sample_gal_cyl(shape=shape, rng=rng))
 
 
 class VsxDataGetter:
@@ -393,16 +460,40 @@ class VsxFoldedModel:
         t = re.sub(r'[^A-Z0-9]', '', t)
         return f'ZTFDR3VSX{t}'
 
-    def to_lclib(self, path, n_approx=128, max_egr=np.inf):
+    def to_lclib(self, path, n_obj=100, n_approx=128, max_egr=np.inf, survey='ZTF', rng=None):
+        logging.info(f'Generating {self.var_type} LCLIB for survey {survey}')
+
+        rng = np.random.default_rng(rng)
+
+        if self.var_type != 'Cepheid':
+            logging.warning('LCLIB supports Cepheid variable type only')
+            return
+
+        if survey == 'ZTF':
+            def magn(row, i, band):
+                return row[self.model_column(band)][i]
+
+            bands = self.bands
+            band_names = [BAND_NAMES[band] for band in bands]
+        elif survey == 'LSST':
+            def magn(row, i, band):
+                return row[self.lsst_model_column(band)][i]
+
+            bands = LSST_BANDS
+            band_names = LSST_BANDS
+        else:
+            raise ValueError(f'survey={survey} is not supported, use ZTF or LSST')
+
         if os.path.isdir(path):
-            path = os.path.join(path, f'{self.var_type}.lclib')
+            path = os.path.join(path, f'{survey}_{self.var_type}.lclib')
 
         df = self.with_approxed(n_approx, endpoint=True, max_egr=max_egr)
+        model = CepheidModel(df)
 
         with open(path, 'w') as fh:
             fh.write(
-                'SURVEY: ZTF\n'
-                f'FILTERS: {"".join(BAND_NAMES[band] for band in self.bands)}\n'
+                f'SURVEY: {survey}\n'
+                f'FILTERS: {band_names}\n'
                 f'MODEL: {self._lclib_model_name}\n'  # CHECKME
                 'MODEL_PARNAMES: VSXOID,PERIOD\n'  # CHECKME
                 'RECUR_CLASS: RECUR-PERIODIC\n'
@@ -419,25 +510,86 @@ class VsxFoldedModel:
                 'COMMENT: PERIOD is the used period, in days\n'
                 '\n'
             )
-            for i_event, (vsx_oid, row) in enumerate(df.iterrows()):
+            for i_event in range(n_obj):
+                row = model.sample(rng=rng)
                 fh.write(
                     f'START_EVENT: {i_event}\n'
-                    f'NROW: {n_approx} RA: {row["RAJ2000"]} DEC: {row["DEJ2000"]}\n'
-                    f'PARVAL: {vsx_oid},{row.period:.6g}\n'
-                    # This option could lead to infinite loop if there is a sky position in a survy not covered by any
+                    f'NROW: {n_approx} RA: {row.ra} DEC: {row.dec}\n'
+                    f'PARVAL: {row.name},{row.period:.6g}\n'
+                    # This option could lead to infinite loop if there is a sky position in a survey not covered by any
                     # LCLIB entry
                     # f'ANGLEMATCH_b: {self.max_abs_b}\n'  # CHECKME
                 )
                 for i in range(n_approx):
-                    time = row['folded_time_model'][i]
+                    time = row.folded_time_model[i]
                     fh.write(f'S: {time:7.4f}')
-                    for band in self.bands:
-                        fh.write(f' {row[self.model_column(band)][i]:.3f}')
+                    for band in bands:
+                        fh.write(f' {magn(row, i, band):.3f}')
                     fh.write('\n')
                 fh.write(
                     f'END_EVENT: {i_event}\n'
                     '\n'
                 )
+
+
+class CepheidModel:
+    period_lognorm_s = 1.0
+    period_min = 0.3
+    ln_period_min = np.log(period_min)
+    period_max = 300
+    ln_period_max = np.log(period_max)
+
+    def __init__(self, df):
+        self.df = df
+        self.galaxy_density = GalaxyDensity()
+        self.periods = self.df['period'].to_numpy(dtype=np.float)
+
+    def model_period_pdf(self, period, mean_period):
+        scale = mean_period / stats.lognorm.mean(s=self.period_lognorm_s)
+        return stats.lognorm.pdf(period, s=self.period_lognorm_s, scale=scale)
+
+    def Mv_period(self, period):
+        # https://arxiv.org/pdf/0707.3144.pdf page 18
+        Mv = -3.932 - 2.819 * (np.log10(period) - 1.0)
+        return Mv
+
+    def sample(self, rng=None):
+        rng = np.random.default_rng(rng)
+        period = self.sample_period(rng=rng)
+        Mv = self.Mv_period(period)
+
+        # Chose random object prototype with close period
+        prob = self.model_period_pdf(period, self.periods)
+        row = self.df.sample(n=1, weights=prob, random_state=rng._bit_generator).iloc[0]
+
+        # Get random coordinates
+        coords = self.galaxy_density.sample_eq(rng=rng)
+        mv = Mv + coords.distance.distmod.value
+        # Magnitude correction to move object to given distance, assuming g is V
+        dm = mv - row['mag_folded_model_g'].mean()
+
+        # Change period
+        row['folded_time_model'] *= period / row['period']
+        row['period'] = period
+
+        # Move object to given distance and apply random color shift
+        for column in row.keys():
+            if not column.startswith('mag_folded_model_'):
+                continue
+            # Apply dm and random color shift
+            row[column] += dm + rng.normal(scale=0.03)
+
+        # Set coordinates
+        row['ra'] = coords.ra.to_value(u.deg)
+        row['dec'] = coords.dec.to_value(u.deg)
+
+        return row
+
+    def sample_period(self, shape=(), rng=None):
+        rng = np.random.default_rng(rng)
+        # Uniform log-period
+        period = np.exp(rng.uniform(low=self.ln_period_min, high=self.ln_period_max, size=shape))
+        return period
 
 
 def prepare_vsx_folded(cli_args):
@@ -450,7 +602,8 @@ def prepare_vsx_folded(cli_args):
         if cli_args.csv:
             model.to_csv(cli_args.output, max_egr=cli_args.maxegr)
         if cli_args.lclib:
-            model.to_lclib(cli_args.output, max_egr=cli_args.maxegr)
+            model.to_lclib(cli_args.output, max_egr=cli_args.maxegr, survey='ZTF', rng=0)
+            model.to_lclib(cli_args.output, max_egr=cli_args.maxegr, survey='LSST', rng=0)
         if cli_args.plots:
             model.plots(cli_args.output)
 
