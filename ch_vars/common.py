@@ -145,7 +145,7 @@ greek_to_latin = GreekToLatin()
 
 
 def nearest(a, v):
-    """Search nearest to v elements of sorted a"""
+    """Search nearest elements of sorted a to given v"""
     a = np.asarray(a)
     v = np.asarray(v)
 
