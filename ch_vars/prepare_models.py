@@ -14,7 +14,6 @@ import numpy as np
 import pandas as pd
 from astropy.coordinates import Distance, SkyCoord, Galactocentric, ICRS
 from astroquery.vizier import Vizier
-from dustmaps import bayestar
 from joblib import Memory
 from pyvo.dal import TAPService
 from scipy.integrate import simps
@@ -50,6 +49,8 @@ class _DustMap:
     bayestar_r = {1: 3.518, 2: 2.617, 3: 1.971}
 
     def __init__(self, cache_dir):
+        from dustmaps import bayestar
+
         if cache_dir is not None:
             bayestar.config['data_dir'] = cache_dir
         bayestar.fetch(version=self.bayestar_version)
