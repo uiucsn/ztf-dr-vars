@@ -609,6 +609,35 @@ def prepare_vsx_folded(cli_args):
             model.plots(cli_args.output)
 
 
+def plot_milky_way_entrypoint(args=None):
+    import matplotlib.pyplot as plt
+
+    logging.basicConfig(level=logging.DEBUG)
+
+    parser = ArgumentParser('Sample galactic distribution')
+    parser.add_argument('-n', '--count', type=int, default=2000,
+                        help='number of objects to generate')
+    parser.add_argument('--random-seed', type=int, default=None,
+                        help='random seed')
+    parser.add_argument('-o', '--output', default='.',
+                        help='directory to save a figure')
+    cli_args = parser.parse_args(args)
+
+    gd = GalaxyDensity()
+    coords = gd.sample_eq(shape=cli_args.count, rng=cli_args.random_seed)
+
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection="mollweide")
+    ax.set_title(f'Eq coordinates, n = {cli_args.count}')
+    # Minus RA is a trick to have "inside" view to the celestial sphere
+    scatter = ax.scatter(-coords.ra.wrap_at(180 * u.deg).radian, coords.dec.wrap_at(180 * u.deg).radian,
+                         s=3, c=coords.distance.to_value(u.kpc), cmap='YlGn', vmin=0)
+    ax.set_xticklabels(['10h', '8h', '6h', '4h', '2h', '0h', '22h', '20h', '18h', '16h', '14h'])
+    colorbar = fig.colorbar(scatter)
+    colorbar.set_label('distance, kpc')
+    fig.savefig(os.path.join(cli_args.output, f'milky_way_plot_{cli_args.count}.png'))
+
+
 def parse_args():
     parser = ArgumentParser('Create Gaussian Process approximated models')
     parser.add_argument('--csv', action='store_true', help='save into .csv.bz2 file')

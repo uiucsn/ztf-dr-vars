@@ -12,6 +12,7 @@ setup(
         'put-asassn-var = ch_vars.asassn:main',
         'put-sdss-82-candidates = ch_vars.sdss_candidates:main',
         'put-sdss-82-vars = ch_vars.sdss_vars:main',
+        'plot-milky-way = ch_vars.prepare_models:plot_milky_way_entrypoint',
     ]},
     include_package_data=True,
     url='',
