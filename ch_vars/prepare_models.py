@@ -193,7 +193,7 @@ def fit_temperature(curves):
     return m0, t
 
 
-class GalaxyDensity:
+class MilkyWayDensity:
     # Juric et al, 2008, Table 10
     # https://iopscience.iop.org/article/10.1086/523619/pdf
     sun_rho_kpc = 8
@@ -542,7 +542,7 @@ class CepheidModel:
 
     def __init__(self, df):
         self.df = df
-        self.galaxy_density = GalaxyDensity()
+        self.mw_density = MilkyWayDensity()
         self.periods = self.df['period'].to_numpy(dtype=np.float)
 
     def model_period_pdf(self, period, mean_period):
@@ -564,7 +564,7 @@ class CepheidModel:
         row = self.df.sample(n=1, weights=prob, random_state=rng._bit_generator).iloc[0]
 
         # Get random coordinates
-        coords = self.galaxy_density.sample_eq(rng=rng)
+        coords = self.mw_density.sample_eq(rng=rng)
         mv = Mv + coords.distance.distmod.value
         # Magnitude correction to move object to given distance, assuming g is V
         dm = mv - row['mag_folded_model_g'].mean()
@@ -623,8 +623,8 @@ def plot_milky_way_entrypoint(args=None):
                         help='directory to save a figure')
     cli_args = parser.parse_args(args)
 
-    gd = GalaxyDensity()
-    coords = gd.sample_eq(shape=cli_args.count, rng=cli_args.random_seed)
+    density = MilkyWayDensity()
+    coords = density.sample_eq(shape=cli_args.count, rng=cli_args.random_seed)
 
     fig = plt.figure(figsize=(8, 6))
     ax = fig.add_subplot(111, projection="mollweide")
