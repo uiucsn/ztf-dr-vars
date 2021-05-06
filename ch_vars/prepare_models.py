@@ -8,11 +8,13 @@ from datetime import datetime
 from functools import lru_cache, partial
 
 import astropy.constants as const
+import astropy.io.ascii
 import astropy.table
 import astropy.units as u
 import numpy as np
 import pandas as pd
-from astropy.coordinates import Distance, SkyCoord, Galactocentric, ICRS
+from astropy.coordinates import Angle, Distance, SkyCoord, Galactocentric, ICRS
+from astropy.table import QTable
 from astroquery.vizier import Vizier
 from joblib import Memory
 from pyvo.dal import TAPService
@@ -24,7 +26,7 @@ from ch_vars.approx import approx_periodic, fold_lc
 from ch_vars.catalogs import CATALOGS
 from ch_vars.common import BAND_NAMES, COLORS, greek_to_latin, str_to_array, numpy_print_options, LSST_BANDS,\
     LSST_COLORS, nearest
-from ch_vars.data import lsst_filter, ztf_filter
+from ch_vars.data import lsst_filter, open_ngc, ztf_filter
 from ch_vars.vsx import VSX_JOINED_TYPES
 
 
@@ -257,6 +259,67 @@ class MilkyWayDensity:
 
     def sample_eq(self, shape=(), rng=None):
         return self.eq_from_gal_cyl(*self.sample_gal_cyl(shape=shape, rng=rng))
+
+
+class SpiralGalaxyDensity:
+    def __init__(self, center_coord: SkyCoord, major_axis: Angle, minor_axis: Angle, position_angle_ne: Angle):
+        self.center_coord = center_coord
+        self.major_axis = major_axis
+        self.minor_axis = minor_axis
+        self.major_arcsec = self.major_axis.to_value(u.arcsec)
+        self.minor_arcsec = self.minor_axis.to_value(u.arcsec)
+        self.position_angle_ne = position_angle_ne
+
+    @classmethod
+    def from_ngc_row(cls, row):
+        return cls(
+            center_coord=row['coord'],
+            major_axis=row['MajAx'],
+            minor_axis=row['MinAx'],
+            position_angle_ne=row['PosAng'],
+        )
+
+    @staticmethod
+    def offset_coords(coords: SkyCoord, offset: Angle, rotate_ne: Angle = Angle(0*u.deg)):
+        z = offset[..., 0] + offset[..., 1] * 1j
+        separation = np.abs(z)
+        position_angle = rotate_ne + np.angle(z)
+        return coords.directional_offset_by(position_angle, separation)
+
+    def sample_eq(self, shape=(), rng=None):
+        rel_coords = self.sample_sky_relative_ellipse(shape=shape, rng=rng)
+        return self.offset_coords(self.center_coord, rel_coords, rotate_ne=self.position_angle_ne)
+
+    def sample_sky_relative_ellipse(self, shape=(), rng=None):
+        if isinstance(shape, int):
+            shape = (shape,)
+
+        rng = np.random.default_rng(rng)
+
+        angles_arcsec = rng.normal(
+            loc=(0.0, 0.0),
+            scale=(self.major_arcsec, self.minor_arcsec),
+            size=tuple(shape) + (2, )
+        )
+        return angles_arcsec * u.arcsec
+
+
+def get_ngc_galaxies():
+    with importlib.resources.open_binary(open_ngc, 'NGC.csv') as fh:
+        table = astropy.io.ascii.read(fh, format='csv', delimiter=';')
+    table = table[table['Type'] == 'G']
+
+    table['RA'] = Angle(table['RA'], unit=u.hour)
+    table['Dec'] = Angle(table['Dec'], unit=u.deg)
+    table['MajAx'] = table['MajAx'] * u.arcmin
+    table['MinAx'] = table['MinAx'] * u.arcmin
+    table['PosAng'] = table['PosAng'] * u.deg
+
+    table['coord'] = SkyCoord(table['RA'], table['Dec'])
+
+    table.add_index('Name')
+
+    return QTable(table)
 
 
 class VsxDataGetter:
@@ -614,7 +677,7 @@ def plot_milky_way_entrypoint(args=None):
 
     logging.basicConfig(level=logging.DEBUG)
 
-    parser = ArgumentParser('Sample galactic distribution')
+    parser = ArgumentParser('Sample Milky Way distribution')
     parser.add_argument('-n', '--count', type=int, default=2000,
                         help='number of objects to generate')
     parser.add_argument('--random-seed', type=int, default=None,
@@ -636,6 +699,48 @@ def plot_milky_way_entrypoint(args=None):
     colorbar = fig.colorbar(scatter)
     colorbar.set_label('distance, kpc')
     fig.savefig(os.path.join(cli_args.output, f'milky_way_plot_{cli_args.count}.png'))
+
+
+def plot_extragalactic_entrypoint(args=None):
+    import matplotlib.pyplot as plt
+    from tqdm import tqdm
+
+    logging.basicConfig(level=logging.DEBUG)
+
+    parser = ArgumentParser('Sample extragalactic distribution')
+    parser.add_argument('-g', '--name', default=None,
+                        help='galaxy name, for example NGC0224 is M31; default is too plot all galaxies')
+    parser.add_argument('-n', '--count', type=int, default=100,
+                        help='number of objects to generate')
+    parser.add_argument('--random-seed', type=int, default=None,
+                        help='random seed')
+    parser.add_argument('-o', '--output', default='.',
+                        help='directory to save a figure')
+    cli_args = parser.parse_args(args)
+
+    ngc = get_ngc_galaxies()
+    rows = [ngc.loc[cli_args.name]] if cli_args.name is not None else ngc
+
+    fig = plt.figure(figsize=(8, 12))
+
+    ax_proj = fig.add_subplot(211, projection="mollweide")
+    ax_rect = fig.add_subplot(212)
+
+    for galaxy in tqdm(rows):
+        density = SpiralGalaxyDensity.from_ngc_row(galaxy)
+        coords = density.sample_eq(shape=cli_args.count, rng=cli_args.random_seed)
+        ax_proj.set_title(f'Eq coordinates, n = {cli_args.count}')
+
+        # Minus RA is a trick to have "inside" view to the celestial sphere
+        ax_proj.scatter(-coords.ra.wrap_at(180 * u.deg).radian, coords.dec.wrap_at(180 * u.deg).radian, s=2)
+        ax_proj.set_xticklabels(['10h', '8h', '6h', '4h', '2h', '0h', '22h', '20h', '18h', '16h', '14h'])
+
+        ax_rect.scatter(coords.ra.wrap_at(180*u.deg).to_value(u.deg), coords.dec.to_value(u.deg))
+        ax_rect.invert_xaxis()
+        ax_rect.set_xlabel('RA')
+        ax_rect.set_ylabel('Dec')
+
+    fig.savefig(os.path.join(cli_args.output, f'extragal_plot_{cli_args.name}_{cli_args.count}.png'))
 
 
 def parse_args():

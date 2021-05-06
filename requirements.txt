@@ -10,3 +10,4 @@ joblib
 astroquery
 dustmaps
 pyvo
+tqdm
