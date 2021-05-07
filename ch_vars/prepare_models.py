@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sys
+from abc import ABC, abstractmethod
 from argparse import ArgumentParser
 from datetime import datetime
 from functools import lru_cache, partial
@@ -216,7 +217,12 @@ class MilkyWayDensity:
     z_min_kpc = -10
     z_max_kpc = 10
 
-    def __init__(self, n_grid=2048):
+    def __init__(self, n_grid=2048, thin_disk_weight=1.0, thick_disk_weight=1.0, halo_weight=1.0):
+        self.n_grid = n_grid
+        self.thin_disk_weight = thin_disk_weight
+        self.thick_disk_weight = thick_disk_weight
+        self.halo_weight = halo_weight
+
         self.rho, self.z = np.meshgrid(
             np.linspace(self.rho_max_kpc, self.rho_min_kpc, n_grid),
             np.linspace(self.z_min_kpc, self.z_max_kpc, n_grid)
@@ -239,7 +245,11 @@ class MilkyWayDensity:
                 * np.power(self.sun_rho_kpc / np.hypot(rho, z / self.ellipticity_halo), self.power_order_halo))
 
     def dens(self, rho, phi, z):
-        return self.thin_disk_dens(rho, phi, z) + self.thick_disk_dens(rho, phi, z) + self.halo_dens(rho, phi, z)
+        return (
+                self.thin_disk_weight * self.thin_disk_dens(rho, phi, z)
+                + self.thick_disk_weight * self.thick_disk_dens(rho, phi, z)
+                + self.halo_weight * self.halo_dens(rho, phi, z)
+        )
 
     def sample_gal_cyl(self, shape=(), rng=None):
         random_rng = np.random.default_rng(rng)
@@ -249,6 +259,12 @@ class MilkyWayDensity:
         z = self.z.reshape(-1)[idx]
         phi = random_rng.uniform(0, 2*np.pi, size=shape)
         return rho, phi, z
+
+    def sample_gal_xyz(self, shape=(), rng=None):
+        rho, phi, z = self.sample_gal_cyl(shape=shape, rng=rng)
+        x = rho * np.cos(phi)
+        y = rho * np.sin(phi)
+        return x, y, z
 
     def eq_from_gal_cyl(self, rho, phi, z):
         x = np.cos(phi) * rho
@@ -261,22 +277,37 @@ class MilkyWayDensity:
         return self.eq_from_gal_cyl(*self.sample_gal_cyl(shape=shape, rng=rng))
 
 
-class SpiralGalaxyDensity:
-    def __init__(self, center_coord: SkyCoord, major_axis: Angle, minor_axis: Angle, position_angle_ne: Angle):
+class MilkyWayLikeGalaxyDensity:
+    def __init__(self, size_scale, **kwargs):
+        self.size_scale = size_scale
+        self.mw = MilkyWayDensity(**kwargs)
+
+    def sample_gal_cyl(self, shape=(), rng=None):
+        rho_phi_z = tuple(x * self.size_scale for x in self.mw.sample_gal_cyl(shape=shape, rng=rng))
+        return rho_phi_z
+
+    def sample_gal_xyz(self, shape=(), rng=None):
+        xyz = tuple(a * self.size_scale for a in self.mw.sample_gal_xyz(shape=shape, rng=rng))
+        return xyz
+
+
+class ExtragalacticDensity(ABC):
+    def __init__(self, center_coord: SkyCoord, position_angle_ne: Angle, major_axis: Angle, minor_axis: Angle):
         self.center_coord = center_coord
+        self.position_angle_ne = position_angle_ne
         self.major_axis = major_axis
         self.minor_axis = minor_axis
         self.major_arcsec = self.major_axis.to_value(u.arcsec)
         self.minor_arcsec = self.minor_axis.to_value(u.arcsec)
-        self.position_angle_ne = position_angle_ne
 
     @classmethod
-    def from_ngc_row(cls, row):
+    def from_ngc_row(cls, row, **kwargs):
         return cls(
             center_coord=row['coord'],
+            position_angle_ne=row['PosAng'],
             major_axis=row['MajAx'],
             minor_axis=row['MinAx'],
-            position_angle_ne=row['PosAng'],
+            **kwargs
         )
 
     @staticmethod
@@ -290,6 +321,28 @@ class SpiralGalaxyDensity:
         rel_coords = self.sample_sky_relative_ellipse(shape=shape, rng=rng)
         return self.offset_coords(self.center_coord, rel_coords, rotate_ne=self.position_angle_ne)
 
+    @abstractmethod
+    def sample_sky_relative_ellipse(self, shape=(), rng=None) -> Angle:
+        pass
+
+
+class SpiralGalaxyDensity(ExtragalacticDensity):
+    # TODO: check
+    mw_25_isophote_kpc = 20.0
+
+    def __init__(self, center_coord: SkyCoord, position_angle_ne: Angle, major_axis: Angle, minor_axis: Angle,
+                 milky_way_like: MilkyWayLikeGalaxyDensity):
+        super().__init__(center_coord, position_angle_ne, major_axis, minor_axis)
+        self.milky_way_like = milky_way_like
+
+    def sample_sky_relative_ellipse(self, shape=(), rng=None):
+        x_kpc, y_kpc, z_kpc = self.milky_way_like.sample_gal_xyz(shape=shape, rng=rng)
+        x_sky = x_kpc / (self.mw_25_isophote_kpc * self.milky_way_like.size_scale) * self.major_axis
+        y_sky = y_kpc / (self.mw_25_isophote_kpc * self.milky_way_like.size_scale) * self.minor_axis
+        return Angle(np.stack([x_sky, y_sky], axis=-1))
+
+
+class EllipticalGalaxyDensity(ExtragalacticDensity):
     def sample_sky_relative_ellipse(self, shape=(), rng=None):
         if isinstance(shape, int):
             shape = (shape,)
@@ -305,14 +358,24 @@ class SpiralGalaxyDensity:
 
 
 def get_ngc_galaxies():
+    """openNGC galaxies
+
+    https://github.com/mattiaverga/OpenNGC
+    See axis description here:
+    https://cdsarc.unistra.fr/viz-bin/ReadMe/VII/119?format=html&tex=true
+    """
     with importlib.resources.open_binary(open_ngc, 'NGC.csv') as fh:
         table = astropy.io.ascii.read(fh, format='csv', delimiter=';')
     table = table[table['Type'] == 'G']
 
     table['RA'] = Angle(table['RA'], unit=u.hour)
     table['Dec'] = Angle(table['Dec'], unit=u.deg)
+
+    # 25mag/arcsec^2 isophote ellipsoidal axes
     table['MajAx'] = table['MajAx'] * u.arcmin
     table['MinAx'] = table['MinAx'] * u.arcmin
+
+    # NE positional angle
     table['PosAng'] = table['PosAng'] * u.deg
 
     table['coord'] = SkyCoord(table['RA'], table['Dec'])
@@ -320,6 +383,17 @@ def get_ngc_galaxies():
     table.add_index('Name')
 
     return QTable(table)
+
+
+def galactic_density_from_ngc_row(row, milky_way_like):
+    hubble_type = row['Hubble']
+    if np.ma.is_masked(hubble_type):
+        raise ValueError('No Hubble type')
+    if hubble_type.startswith('S'):
+        return SpiralGalaxyDensity.from_ngc_row(row, milky_way_like=milky_way_like)
+    if hubble_type.startswith('E'):
+        return EllipticalGalaxyDensity.from_ngc_row(row)
+    raise ValueError(f'Unsupported galaxy type: {hubble_type}')
 
 
 class VsxDataGetter:
@@ -721,13 +795,19 @@ def plot_extragalactic_entrypoint(args=None):
     ngc = get_ngc_galaxies()
     rows = [ngc.loc[cli_args.name]] if cli_args.name is not None else ngc
 
-    fig = plt.figure(figsize=(8, 12))
+    milky_way_like = MilkyWayLikeGalaxyDensity(size_scale=1.0)
+
+    fig = plt.figure(figsize=(24, 36))
 
     ax_proj = fig.add_subplot(211, projection="mollweide")
     ax_rect = fig.add_subplot(212)
 
     for galaxy in tqdm(rows):
-        density = SpiralGalaxyDensity.from_ngc_row(galaxy)
+        try:
+            density = galactic_density_from_ngc_row(galaxy, milky_way_like)
+        except ValueError as e:
+            continue
+
         coords = density.sample_eq(shape=cli_args.count, rng=cli_args.random_seed)
         ax_proj.set_title(f'Eq coordinates, n = {cli_args.count}')
 
@@ -735,12 +815,64 @@ def plot_extragalactic_entrypoint(args=None):
         ax_proj.scatter(-coords.ra.wrap_at(180 * u.deg).radian, coords.dec.wrap_at(180 * u.deg).radian, s=2)
         ax_proj.set_xticklabels(['10h', '8h', '6h', '4h', '2h', '0h', '22h', '20h', '18h', '16h', '14h'])
 
-        ax_rect.scatter(coords.ra.wrap_at(180*u.deg).to_value(u.deg), coords.dec.to_value(u.deg))
-        ax_rect.invert_xaxis()
-        ax_rect.set_xlabel('RA')
-        ax_rect.set_ylabel('Dec')
+    ax_rect.set_title(galaxy['Name'])
+    ax_rect.scatter(coords.ra.wrap_at(180*u.deg).to_value(u.deg), coords.dec.to_value(u.deg))
+    ax_rect.invert_xaxis()
+    ax_rect.set_xlabel('RA')
+    ax_rect.set_ylabel('Dec')
 
     fig.savefig(os.path.join(cli_args.output, f'extragal_plot_{cli_args.name}_{cli_args.count}.png'))
+
+
+def plot_map_entrypoint(args=None):
+    from itertools import chain, cycle
+
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import TABLEAU_COLORS
+    from tqdm import tqdm
+
+    colors = list(TABLEAU_COLORS.values())
+
+    logging.basicConfig(level=logging.DEBUG)
+
+    parser = ArgumentParser('Sample object distribution')
+    parser.add_argument('--count-mw', type=int, default=2000,
+                        help='number of Milky Way objects to generate')
+    parser.add_argument('--count-galaxy', type=int, default=200,
+                        help='number of obects per galaxy to generate')
+    parser.add_argument('--random-seed', type=int, default=None,
+                        help='random seed')
+    parser.add_argument('-o', '--output', default='.',
+                        help='directory to save a figure')
+    cli_args = parser.parse_args(args)
+
+    rng = np.random.default_rng(cli_args.random_seed)
+
+    milky_way = MilkyWayDensity()
+    mw_coords = milky_way.sample_eq(shape=cli_args.count_mw, rng=rng)
+
+    ngc = get_ngc_galaxies()
+    milky_way_like = MilkyWayLikeGalaxyDensity(size_scale=1.0)
+    extra_coords = []
+    for galaxy in tqdm(ngc):
+        try:
+            density = galactic_density_from_ngc_row(galaxy, milky_way_like)
+        except ValueError as e:
+            continue
+        extra_coords.append(density.sample_eq(shape=cli_args.count_galaxy, rng=rng))
+    extra_colors = list(chain.from_iterable([color] * coords.size for color, coords in zip(cycle(colors), extra_coords)))
+    extra_coords = SkyCoord(extra_coords)
+
+    fig = plt.figure(figsize=(16, 12))
+    ax = fig.add_subplot(111, projection="mollweide")
+    # Minus RA is a trick to have "inside" view to the celestial sphere
+    ax.plot(-mw_coords.ra.wrap_at(180 * u.deg).radian, mw_coords.dec.wrap_at(180 * u.deg).radian,
+            's', color='black', ms=3, label='MW')
+    ax.scatter(-extra_coords.ra.wrap_at(180 * u.deg).radian, extra_coords.dec.wrap_at(180 * u.deg).radian,
+               c=extra_colors, s=3, label='NGC')
+    ax.set_xticklabels(['10h', '8h', '6h', '4h', '2h', '0h', '22h', '20h', '18h', '16h', '14h'])
+    ax.legend()
+    fig.savefig(os.path.join(cli_args.output, f'map_plot_{cli_args.count_mw}_{cli_args.count_galaxy}.png'))
 
 
 def parse_args():
