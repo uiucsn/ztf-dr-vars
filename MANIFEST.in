@@ -2,3 +2,4 @@ include ch_vars/data/asassn-catalog-20191020.csv.bz2
 include ch_vars/data/good_vsx_folded/*.dat
 include ch_vars/data/ztf_filter/*.csv
 include ch_vars/data/open_ngc/NGC.csv
+include ch_vars/data/hyperleda/HyperLeda_a007_1620838730.txt

@@ -27,7 +27,7 @@ from ch_vars.approx import approx_periodic, fold_lc
 from ch_vars.catalogs import CATALOGS
 from ch_vars.common import BAND_NAMES, COLORS, greek_to_latin, str_to_array, numpy_print_options, LSST_BANDS,\
     LSST_COLORS, nearest
-from ch_vars.data import lsst_filter, open_ngc, ztf_filter
+from ch_vars.data import hyperleda, lsst_filter, open_ngc, ztf_filter
 from ch_vars.vsx import VSX_JOINED_TYPES
 
 
@@ -501,12 +501,18 @@ class EllipticalGalaxyDensity(ExtragalacticDensity):
         return angles_arcsec * u.arcsec
 
 
-def get_ngc_galaxies():
+def get_ngc_galaxies(leda_distance=True):
     """openNGC galaxies
 
     https://github.com/mattiaverga/OpenNGC
     See axis description here:
     https://cdsarc.unistra.fr/viz-bin/ReadMe/VII/119?format=html&tex=true
+
+    Arguments
+    ---------
+    leda_distance : bool, optional
+        Add distance modulus from HyperLeda and keep objects found there only
+
     """
     with importlib.resources.open_binary(open_ngc, 'NGC.csv') as fh:
         table = astropy.io.ascii.read(fh, format='csv', delimiter=';')
@@ -526,7 +532,34 @@ def get_ngc_galaxies():
 
     table.add_index('Name')
 
-    return QTable(table)
+    table = QTable(table)
+
+    if leda_distance:
+        leda = get_hyperleda()
+        table = table[np.isin(table['Name'], leda.index)]
+        table['distance'] = Distance(distmod=leda['modulus'].loc[table['Name']])
+
+    return table
+
+
+def get_hyperleda():
+    column_names = ['objname', 'j2000', 'modulus']
+    with importlib.resources.open_binary(hyperleda, 'HyperLeda_a007_1620838730.txt') as fh:
+        df = pd.read_csv(
+            fh,
+            skiprows=17,
+            comment='#',
+            delimiter=r'\s+',
+            names=column_names,
+            usecols=column_names,
+            index_col='objname',
+        )
+    grouped_df = pd.DataFrame(
+        [{'objname': objname, 'j2000': df['j2000'].iloc[0], 'modulus': df['modulus'].median()}
+         for objname, df in df.groupby(by='objname', axis=0, as_index=True)],
+    )
+    grouped_df = grouped_df.set_index('objname')
+    return grouped_df
 
 
 def galactic_density_from_ngc_row(row, milky_way_like):
