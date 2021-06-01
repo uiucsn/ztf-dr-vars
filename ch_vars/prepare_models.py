@@ -197,8 +197,8 @@ def fit_temperature(curves):
 
 
 class MilkyWayDensityBase(ABC):
-    sun_z = None
-    sun_rho = None
+    sun_z_kpc = None
+    sun_rho_kpc = None
 
     rho_min_kpc = 0
     rho_max_kpc = 20
@@ -233,7 +233,8 @@ class MilkyWayDensityBase(ABC):
     def eq_from_gal_cyl(self, rho, phi, z):
         x = np.cos(phi) * rho
         y = np.sin(phi) * rho
-        gc = Galactocentric(x=x*u.kpc, y=y*u.kpc, z=z*u.kpc, z_sun=self.sun_z, galcen_distance=self.sun_rho)
+        gc = Galactocentric(x=x*u.kpc, y=y*u.kpc, z=z*u.kpc,
+                            z_sun=self.sun_z_kpc*u.kpc, galcen_distance=self.sun_rho_kpc*u.kpc)
         eq = gc.transform_to(ICRS())
         return eq
 
@@ -422,9 +423,9 @@ class MilkyWayDensityJuric2008(MilkyWayDensityBase):
 
 
 class MilkyWayLikeGalaxyDensity:
-    def __init__(self, size_scale, **kwargs):
+    def __init__(self, size_scale, milky_way):
         self.size_scale = size_scale
-        self.mw = MilkyWayDensityJuric2008(**kwargs)
+        self.mw = milky_way
 
     def sample_gal_cyl(self, shape=(), rng=None):
         rho_phi_z = tuple(x * self.size_scale for x in self.mw.sample_gal_cyl(shape=shape, rng=rng))
@@ -472,21 +473,28 @@ class ExtragalacticDensity(ABC):
 
 class SpiralGalaxyDensity(ExtragalacticDensity):
     # TODO: check
-    mw_25_isophote_kpc = 20.0
+    # TODO: see Burstein et al., 1982, about Sc galaxy mass distribution
+    # https://ui.adsabs.harvard.edu/abs/1982ApJ...253...70B
+    mw_isophote_25_kpc = 20.0
 
     def __init__(self, center_coord: SkyCoord, position_angle_ne: Angle, major_axis: Angle, minor_axis: Angle,
-                 milky_way_like: MilkyWayLikeGalaxyDensity):
+                 milky_way: MilkyWayDensityBase):
         super().__init__(center_coord, position_angle_ne, major_axis, minor_axis)
-        self.milky_way_like = milky_way_like
+
+        major_axis_kpc = (2.0 * np.tan(major_axis) * center_coord.distance).to_value(u.kpc)
+        size_scale = major_axis_kpc / self.mw_isophote_25_kpc
+        self.milky_way_like = MilkyWayLikeGalaxyDensity(size_scale=size_scale, milky_way=milky_way)
 
     def sample_sky_relative_ellipse(self, shape=(), rng=None):
         x_kpc, y_kpc, z_kpc = self.milky_way_like.sample_gal_xyz(shape=shape, rng=rng)
-        x_sky = x_kpc / (self.mw_25_isophote_kpc * self.milky_way_like.size_scale) * self.major_axis
-        y_sky = y_kpc / (self.mw_25_isophote_kpc * self.milky_way_like.size_scale) * self.minor_axis
+        x_sky = x_kpc / (self.mw_isophote_25_kpc * self.milky_way_like.size_scale) * self.major_axis
+        y_sky = y_kpc / (self.mw_isophote_25_kpc * self.milky_way_like.size_scale) * self.minor_axis
         return Angle(np.stack([x_sky, y_sky], axis=-1))
 
 
 class EllipticalGalaxyDensity(ExtragalacticDensity):
+    scale_radii_in_25_isophote = 10.0
+
     def sample_sky_relative_ellipse(self, shape=(), rng=None):
         if isinstance(shape, int):
             shape = (shape,)
@@ -495,7 +503,8 @@ class EllipticalGalaxyDensity(ExtragalacticDensity):
 
         angles_arcsec = rng.normal(
             loc=(0.0, 0.0),
-            scale=(self.major_arcsec, self.minor_arcsec),
+            scale=(self.major_arcsec / self.scale_radii_in_25_isophote,
+                   self.minor_arcsec / self.scale_radii_in_25_isophote),
             size=tuple(shape) + (2, )
         )
         return angles_arcsec * u.arcsec
@@ -562,12 +571,12 @@ def get_hyperleda():
     return grouped_df
 
 
-def galactic_density_from_ngc_row(row, milky_way_like):
+def galactic_density_from_ngc_row(row, milky_way):
     hubble_type = row['Hubble']
     if np.ma.is_masked(hubble_type):
         raise ValueError('No Hubble type')
     if hubble_type.startswith('S'):
-        return SpiralGalaxyDensity.from_ngc_row(row, milky_way_like=milky_way_like)
+        return SpiralGalaxyDensity.from_ngc_row(row, milky_way=milky_way)
     if hubble_type.startswith('E'):
         return EllipticalGalaxyDensity.from_ngc_row(row)
     raise ValueError(f'Unsupported galaxy type: {hubble_type}')
@@ -972,7 +981,7 @@ def plot_extragalactic_entrypoint(args=None):
     ngc = get_ngc_galaxies()
     rows = [ngc.loc[cli_args.name]] if cli_args.name is not None else ngc
 
-    milky_way_like = MilkyWayLikeGalaxyDensity(size_scale=1.0)
+    milky_way_like = MilkyWayLikeGalaxyDensity(size_scale=1.0, milky_way=MilkyWayDensityJuric2008())
 
     fig = plt.figure(figsize=(24, 36))
 
@@ -1032,7 +1041,7 @@ def plot_map_entrypoint(args=None):
 
     ngc = get_ngc_galaxies()
     ngc = ngc[ngc['distance'] <= Distance(cli_args.max_distance, unit=u.Mpc)]
-    milky_way_like = MilkyWayLikeGalaxyDensity(size_scale=1.0)
+    milky_way_like = MilkyWayLikeGalaxyDensity(size_scale=1.0, milky_way=MilkyWayDensityJuric2008())
     extra_coords = []
     for galaxy in tqdm(ngc):
         try:
