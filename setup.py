@@ -1,9 +1,9 @@
-from setuptools import setup
+from setuptools import find_packages, setup
 
 setup(
     name='ch-vars',
     version='0.0.1',
-    packages=['ch_vars'],
+    packages=find_packages(exclude=['test', 'tests']),
     entry_points={'console_scripts': [
         'plot-var-stats = ch_vars.plot:main',
         'prepare = ch_vars.prepare_models:main',
