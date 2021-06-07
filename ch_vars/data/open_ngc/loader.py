@@ -1,4 +1,4 @@
-import importlib
+import importlib.resources
 
 import astropy
 import astropy.units as u
