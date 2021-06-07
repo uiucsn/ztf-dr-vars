@@ -159,3 +159,10 @@ def nearest(a, v):
 
     nearest_idx = idx[(left_or_right,) + tuple(np.indices(v.shape))]
     return nearest_idx
+
+
+def mean_reduce(a, factor=10):
+    if a.size % factor != 0:
+        a = np.concatenate([a, np.full(factor - a.size % factor, a[-1])])
+    mean = a.reshape(-1, factor).mean(axis=1)
+    return mean

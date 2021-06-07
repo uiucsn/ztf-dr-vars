@@ -5,7 +5,7 @@ import re
 import sys
 from argparse import ArgumentParser
 from datetime import datetime
-from functools import lru_cache, partial
+from functools import partial
 
 import astropy.constants as const
 import astropy.io.ascii
@@ -25,7 +25,7 @@ from ch_vars.approx import approx_periodic, fold_lc
 from ch_vars.catalogs import CATALOGS
 from ch_vars.common import BAND_NAMES, COLORS, greek_to_latin, str_to_array, numpy_print_options, LSST_BANDS,\
     LSST_COLORS
-from ch_vars.data import get_ngc_galaxies, lsst_filter, ztf_filter
+from ch_vars.data import get_ngc_galaxies, lsst_band_transmission, ztf_band_transmission
 from ch_vars.spatial_distr import MilkyWayDensityJuric2008, MilkyWayDensityBesancon, MilkyWayLikeGalaxyDensity,\
     galactic_density_from_ngc_row
 from ch_vars.vsx import VSX_JOINED_TYPES
@@ -116,53 +116,6 @@ def get_distance(ra, dec, search_radius_arcsec=1):
         row = response.getrecord(np.argmin(response['d']))
         distance.append(row['r_med_photogeo'].item() * u.pc)
     return u.Quantity(distance)
-
-
-def fix_negative(a):
-    index = np.arange(a.size, dtype=a.dtype)
-    i = a < 0
-    a[i] = np.interp(index[i], index[~i], a[~i])
-
-
-def mean_reduce(a, factor=10):
-    if a.size % factor != 0:
-        a = np.concatenate([a, np.full(factor - a.size % factor, a[-1])])
-    mean = a.reshape(-1, factor).mean(axis=1)
-    return mean
-
-
-@lru_cache()
-def ztf_band_transmission(band: int):
-    filename = f'ztf_{BAND_NAMES[band]}_band.csv'
-    with importlib.resources.open_binary(ztf_filter, filename) as fh:
-        lmbd, r = np.genfromtxt(fh, delimiter=',', unpack=True)
-    if lmbd[0] > lmbd[-1]:
-        lmbd = lmbd[::-1]
-        r = r[::-1]
-    lmbd *= 1e-7  # from nm to cm
-    r *= 1e-2  # from percent to fraction
-
-    fix_negative(r)
-
-    lmbd = mean_reduce(lmbd)
-    r = mean_reduce(r)
-    norm = simps(x=lmbd, y=r)
-    return lmbd, r, norm
-
-
-@lru_cache()
-def lsst_band_transmission(band: str):
-    filename = f'lsst_total_{band.lower()}.dat'
-    with importlib.resources.open_binary(lsst_filter, filename) as fh:
-        lmbd, r = np.genfromtxt(fh, delimiter=' ', comments='#', unpack=True)
-
-    lmbd *= 1e-7  # from nm to cm
-
-    lmbd = mean_reduce(lmbd)
-    r = mean_reduce(r)
-
-    norm = simps(x=lmbd, y=r)
-    return lmbd, r, norm
 
 
 HC_K = const.h.cgs.value * const.c.cgs.value / const.k_B.cgs.value
