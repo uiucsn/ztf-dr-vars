@@ -57,7 +57,7 @@ class _DustMap:
         if cache_dir is not None:
             bayestar.config['data_dir'] = cache_dir
         bayestar.fetch(version=self.bayestar_version)
-        self.bayestar = bayestar.BayestarQuery(version=self.bayestar_version)
+        self.bayestar = bayestar.BayestarQuery(version=self.bayestar_version, max_samples=0)
 
 
 class DustMap(_DustMap):
