@@ -50,7 +50,7 @@ class BayestarDustMap(_BayestarDustMap):
 
 def bayestar_get(ra, dec, distance, cache_dir):
     coords = SkyCoord(ra=ra*u.deg, dec=dec*u.deg, distance=distance*u.pc)
-    return BayestarDustMap(cache_dir).bayestar(coords)
+    return BayestarDustMap(cache_dir).bayestar(coords, mode='best')
 
 
 class _SFDDustMap:
@@ -82,8 +82,8 @@ class PatchedBayestarDustMap:
         flipped_coords = SkyCoord(l=-gal.l, b=-gal.b, distance=gal.distance, frame='galactic').icrs
         sfd = self.sfd(coord)
         flipped_sfd = self.sfd(flipped_coords)
-        extinction = self.bayestar(coord)
-        flipped_extinction = self.bayestar(flipped_coords)
+        extinction = self.bayestar(coord, mode='best')
+        flipped_extinction = self.bayestar(flipped_coords, mode='best')
         normalized_flipped_extinction = np.where(
             (flipped_sfd != 0) & (sfd != 0),
             flipped_extinction * flipped_sfd / sfd,
