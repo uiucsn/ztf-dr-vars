@@ -473,8 +473,12 @@ def prepare_vsx_folded(cli_args):
         if cli_args.csv:
             model.to_csv(cli_args.output, max_egr=cli_args.maxegr)
         if cli_args.lclib:
-            model.to_lclib(cli_args.output, n_obj=cli_args.count, max_egr=cli_args.maxegr, survey='ZTF', rng=0)
-            model.to_lclib(cli_args.output, n_obj=cli_args.count, max_egr=cli_args.maxegr, survey='LSST', rng=0)
+            if cli_args.survey is None:
+                surveys = ['ZTF', 'LSST']
+            else:
+                surveys = [cli_args.survey]
+            for survey in surveys:
+                model.to_lclib(cli_args.output, n_obj=cli_args.count, max_egr=cli_args.maxegr, survey=survey, rng=0)
         if cli_args.plots:
             model.plots(cli_args.output)
 
@@ -483,6 +487,7 @@ def parse_args():
     parser = ArgumentParser('Create Gaussian Process approximated models')
     parser.add_argument('--csv', action='store_true', help='save into .csv.bz2 file')
     parser.add_argument('--lclib', action='store_true', help='save in SNANA LCLIB format')
+    parser.add_argument('--survey', default=None, help='output LCLIB for ZTF or LSST, default is both')
     parser.add_argument('-n', '--count', type=int, default=100, help='number of objects to generate')
     parser.add_argument('--plots', action='store_true', help='plot figures')
     parser.add_argument('-d', '--data', default='https://static.rubin.science/',
