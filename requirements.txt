@@ -11,3 +11,4 @@ astroquery
 dustmaps
 pyvo
 tqdm
+numba

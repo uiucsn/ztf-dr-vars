@@ -25,9 +25,9 @@ from ch_vars.approx import approx_periodic, fold_lc
 from ch_vars.catalogs import CATALOGS
 from ch_vars.common import BAND_NAMES, COLORS, greek_to_latin, str_to_array, numpy_print_options, LSST_BANDS,\
     LSST_COLORS
-from ch_vars.data import get_ngc_galaxies, lsst_band_transmission, ztf_band_transmission
-from ch_vars.spatial_distr import MilkyWayDensityJuric2008, MilkyWayDensityBesancon, MilkyWayLikeGalaxyDensity,\
-    galactic_density_from_ngc_row
+from ch_vars.data import lsst_band_transmission, ztf_band_transmission
+from ch_vars.extinction import BayestarDustMap, bayestar_get, get_sfd_thin_disk_ebv, LSST_A_TO_EBV
+from ch_vars.spatial_distr import MilkyWayDensityJuric2008
 from ch_vars.vsx import VSX_JOINED_TYPES
 
 
@@ -45,33 +45,6 @@ def get_ids(package):
     filenames = (fname for fname in importlib.resources.contents(package) if fname.endswith('.dat'))
     ids = {os.path.splitext(name)[0]: read_file(name) for name in sorted(filenames)}
     return ids
-
-
-class _DustMap:
-    bayestar_version = 'bayestar2019'
-    bayestar_r = {1: 3.518, 2: 2.617, 3: 1.971}
-
-    def __init__(self, cache_dir):
-        from dustmaps import bayestar
-
-        if cache_dir is not None:
-            bayestar.config['data_dir'] = cache_dir
-        bayestar.fetch(version=self.bayestar_version)
-        self.bayestar = bayestar.BayestarQuery(version=self.bayestar_version, max_samples=0)
-
-
-class DustMap(_DustMap):
-    _objects = {}
-
-    def __new__(cls, cache_dir):
-        if cache_dir not in cls._objects:
-            cls._objects[cache_dir] = _DustMap(cache_dir)
-        return cls._objects[cache_dir]
-
-
-def beyestar_get(ra, dec, distance, cache_dir):
-    coords = SkyCoord(ra=ra*u.deg, dec=dec*u.deg, distance=distance*u.pc)
-    return DustMap(cache_dir).bayestar(coords)
 
 
 def get_ztf_data(ids, catalog_path, id_column):
@@ -154,13 +127,14 @@ class VsxDataGetter:
 
     def __init__(self, data_dir, cache_dir, type_ids):
         self.cat = CATALOGS['vsx']
-        self.memory = Memory(location=cache_dir)
-        if cache_dir is None:
-            dustmaps_cache_dir = None
+        self.cache_dir = cache_dir
+        self.memory = Memory(location=self.cache_dir)
+        if self.cache_dir is None:
+            self.dustmaps_cache_dir = None
         else:
-            dustmaps_cache_dir = os.path.join(cache_dir, 'dustmaps')
-        self.get_egr = partial(self.memory.cache(beyestar_get), cache_dir=dustmaps_cache_dir)
-        self.extinction_coeff = DustMap.bayestar_r
+            self.dustmaps_cache_dir = os.path.join(self.cache_dir, 'dustmaps')
+        self.get_egr = partial(self.memory.cache(bayestar_get), cache_dir=self.dustmaps_cache_dir)
+        self.extinction_coeff = BayestarDustMap.bayestar_r
         self.vizier = Vizier()
         catalog_path = os.path.join(data_dir, self.cat.filename)
         self.get_ztf_data = partial(
@@ -190,7 +164,7 @@ class VsxDataGetter:
 class VsxFoldedModel:
     max_abs_b = 10
 
-    def __init__(self, data, var_type, ids):
+    def __init__(self, data: VsxDataGetter, var_type, ids):
         self.data = data
         self.var_type = var_type
         self.ids = ids
@@ -379,7 +353,7 @@ class VsxFoldedModel:
             path = os.path.join(path, f'{survey}_{self.var_type}.lclib')
 
         df = self.with_approxed(n_approx, endpoint=True, max_egr=max_egr)
-        model = CepheidModel(df)
+        model = CepheidModel(df, self.data.dustmaps_cache_dir)
 
         with open(path, 'w') as fh:
             fh.write(
@@ -430,10 +404,11 @@ class CepheidModel:
     period_max = 300
     ln_period_max = np.log(period_max)
 
-    def __init__(self, df):
+    def __init__(self, df, dustmaps_cache_dir):
         self.df = df
         self.mw_density = MilkyWayDensityJuric2008()
         self.periods = self.df['period'].to_numpy(dtype=np.float)
+        self.dustmaps_cache_dir = dustmaps_cache_dir
 
     def model_period_pdf(self, period, mean_period):
         scale = mean_period / stats.lognorm.mean(s=self.period_lognorm_s)
@@ -455,24 +430,29 @@ class CepheidModel:
 
         # Get random coordinates
         coords = self.mw_density.sample_eq(rng=rng)
-        mv = Mv + coords.distance.distmod.value
         # Magnitude correction to move object to given distance, assuming g is V
+        mv = Mv + coords.distance.distmod.value
         dm = mv - row['mag_folded_model_g'].mean()
+
+        # Get extinction
+        row['ebv'] = get_sfd_thin_disk_ebv(coords.ra.deg, coords.dec.deg, coords.distance.pc, self.dustmaps_cache_dir)
 
         # Change period
         row['folded_time_model'] *= period / row['period']
         row['period'] = period
 
-        # Move object to given distance and apply random color shift
+        # Apply random color shift and add extinction
         for column in row.keys():
             if not column.startswith('mag_folded_model_'):
                 continue
-            # Apply dm and random color shift
-            row[column] += dm + rng.normal(scale=0.03)
+            band = column[-1]
+            # Apply dm, random color shift and extinction
+            row[column] += dm + row['ebv'] * LSST_A_TO_EBV[band] + rng.normal(scale=0.03)
 
         # Set coordinates
         row['ra'] = coords.ra.to_value(u.deg)
         row['dec'] = coords.dec.to_value(u.deg)
+        row['distance_pc'] = coords.distance.to_value(u.pc)
 
         return row
 
