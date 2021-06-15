@@ -362,7 +362,7 @@ class VsxFoldedModel:
                 f'MODEL: {self._lclib_model_name}\n'  # CHECKME
                 'MODEL_PARNAMES: VSXOID,PERIOD\n'  # CHECKME
                 'RECUR_CLASS: RECUR-PERIODIC\n'
-                f'NEVENT: {df.shape[0]}\n'
+                f'NEVENT: {n_obj}\n'
                 '\n'
             )
             fh.write(
