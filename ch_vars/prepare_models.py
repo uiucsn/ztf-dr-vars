@@ -4,6 +4,7 @@ import os
 import re
 import sys
 from argparse import ArgumentParser
+from copy import deepcopy
 from datetime import datetime
 from functools import partial
 
@@ -24,7 +25,7 @@ from scipy import stats
 from ch_vars.approx import approx_periodic, fold_lc
 from ch_vars.catalogs import CATALOGS
 from ch_vars.common import BAND_NAMES, COLORS, greek_to_latin, str_to_array, numpy_print_options, LSST_BANDS,\
-    LSST_COLORS
+    LSST_COLORS, deepcopy_pd_series
 from ch_vars.data import lsst_band_transmission, ztf_band_transmission
 from ch_vars.extinction import BayestarDustMap, bayestar_get, get_sfd_thin_disk_ebv, LSST_A_TO_EBV
 from ch_vars.spatial_distr import MilkyWayDensityJuric2008
@@ -426,7 +427,7 @@ class CepheidModel:
 
         # Chose random object prototype with close period
         prob = self.model_period_pdf(period, self.periods)
-        row = self.df.sample(n=1, weights=prob, random_state=rng._bit_generator).iloc[0]
+        row = deepcopy_pd_series(self.df.sample(n=1, weights=prob, random_state=rng._bit_generator).iloc[0])
 
         # Get random coordinates
         coords = self.mw_density.sample_eq(rng=rng)
@@ -438,7 +439,11 @@ class CepheidModel:
         row['ebv'] = get_sfd_thin_disk_ebv(coords.ra.deg, coords.dec.deg, coords.distance.pc, self.dustmaps_cache_dir)
 
         # Change period
-        row['folded_time_model'] *= period / row['period']
+        import warnings
+        with warnings.catch_warnings(record=True) as warn:
+            row['folded_time_model'] *= period / row['period']
+            if warn:
+                breakpoint()
         row['period'] = period
 
         # Apply random color shift and add extinction

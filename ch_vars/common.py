@@ -1,9 +1,11 @@
 import logging
 import re
 from contextlib import contextmanager
+from copy import deepcopy
 
 import numpy as np
 from clickhouse_driver import Client
+from pandas import Series
 
 
 LSST_BANDS = tuple('ugrizY')
@@ -166,3 +168,7 @@ def mean_reduce(a, factor=10):
         a = np.concatenate([a, np.full(factor - a.size % factor, a[-1])])
     mean = a.reshape(-1, factor).mean(axis=1)
     return mean
+
+
+def deepcopy_pd_series(series):
+    return Series(deepcopy(series.to_dict()))
