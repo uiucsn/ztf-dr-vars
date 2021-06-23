@@ -192,6 +192,7 @@ class VsxFoldedModel:
         self.df = self.vsx_data.to_pandas(index=self.id_column).join(self.data.ztf_data[self.data.ztf_data.index.isin(ids)])
         self.folded_objects = [self.data.fold_lc(obj, period_range=self.data.cat.periodic_types[var_type].range)
                                for obj in self.df.to_records()]
+        self.df['vsx_id'] = self.df.index
         self.df['period'] = [folded['period'] for folded in self.folded_objects]
         self.approx_funcs = {i: {} for i in self.df.index}
         self.extinction = {i: {} for i in self.df.index}
@@ -391,7 +392,7 @@ class VsxFoldedModel:
                 fh.write(
                     f'START_EVENT: {i_event}\n'
                     f'NROW: {n_approx} RA: {row.ra:.5f} DEC: {row.dec:.5f}\n'
-                    f'PARVAL: {row.name},{row.period:.6g}\n'
+                    f'PARVAL: {row.vsx_id},{row.period:.6g}\n'
                     f'ANGLEMATCH_b: {anglematch_b:.1f}\n'
                 )
                 for i in range(n_approx):
