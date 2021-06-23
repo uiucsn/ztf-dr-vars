@@ -14,7 +14,7 @@ import astropy.table
 import astropy.units as u
 import numpy as np
 import pandas as pd
-from astropy.coordinates import Distance, SkyCoord
+from astropy.coordinates import Distance, Galactic, SkyCoord
 from astroquery.vizier import Vizier
 from joblib import Memory
 from pyvo.dal import TAPService
@@ -351,15 +351,18 @@ class VsxFoldedModel:
             raise ValueError(f'survey={survey} is not supported, use ZTF or LSST')
 
         if os.path.isdir(path):
-            path = os.path.join(path, f'{survey}_{self.var_type}.lclib')
+            path = os.path.join(path, f'LCLIB_{self.var_type}-{survey}.TEXT')
 
         df = self.with_approxed(n_approx, endpoint=True, max_egr=max_egr)
         model = CepheidModel(df, self.data.dustmaps_cache_dir)
 
+        min_anglematch_b = max(1.0, 90.0 / np.sqrt(n_obj))
+        factor_anglematch_b = max(0.1, 1.0 / np.sqrt(n_obj))
+
         with open(path, 'w') as fh:
             fh.write(
                 f'SURVEY: {survey}\n'
-                f'FILTERS: {band_names}\n'
+                f'FILTERS: {"".join(band_names)}\n'
                 f'MODEL: {self._lclib_model_name}\n'  # CHECKME
                 'MODEL_PARNAMES: VSXOID,PERIOD\n'  # CHECKME
                 'RECUR_CLASS: RECUR-PERIODIC\n'
@@ -377,14 +380,19 @@ class VsxFoldedModel:
                 '\n'
             )
             for i_event in range(n_obj):
-                row = model.sample(rng=rng)
+                while True:
+                    row = model.sample(rng=rng).iloc[0]
+                    if all(np.all((magn(row, None, band) > 5.0) & (magn(row, None, band) < 99.0)) for band in bands):
+                        break
+                    logging.debug(
+                        f"{self.var_type} light curve doesn't fit into SNANA supported magnitude range of [5.0, 99.0]"
+                    )
+                anglematch_b = max(min_anglematch_b, factor_anglematch_b * row.b)
                 fh.write(
                     f'START_EVENT: {i_event}\n'
-                    f'NROW: {n_approx} RA: {row.ra} DEC: {row.dec}\n'
+                    f'NROW: {n_approx} RA: {row.ra:.5f} DEC: {row.dec:.5f}\n'
                     f'PARVAL: {row.name},{row.period:.6g}\n'
-                    # This option could lead to infinite loop if there is a sky position in a survey not covered by any
-                    # LCLIB entry
-                    # f'ANGLEMATCH_b: {self.max_abs_b}\n'  # CHECKME
+                    f'ANGLEMATCH_b: {anglematch_b:.1f}\n'
                 )
                 for i in range(n_approx):
                     time = row.folded_time_model[i]
@@ -404,6 +412,7 @@ class CepheidModel:
     ln_period_min = np.log(period_min)
     period_max = 300
     ln_period_max = np.log(period_max)
+    __galactic_frame = Galactic()
 
     def __init__(self, df, dustmaps_cache_dir):
         self.df = df
@@ -420,46 +429,53 @@ class CepheidModel:
         Mv = -3.932 - 2.819 * (np.log10(period) - 1.0)
         return Mv
 
-    def sample(self, rng=None):
+    def sample(self, shape=(), rng=None):
+        if len(shape) > 1:
+            raise ValueError('2 and more dimensions for shape is not supported, because it is not clear how to build a DataFrame from the multidimensional data')
+
         rng = np.random.default_rng(rng)
-        period = self.sample_period(rng=rng)
+        period = self.sample_period(shape=shape + (1,), rng=rng)
         Mv = self.Mv_period(period)
 
         # Chose random object prototype with close period
         prob = self.model_period_pdf(period, self.periods)
-        row = deepcopy_pd_series(self.df.sample(n=1, weights=prob, random_state=rng._bit_generator).iloc[0])
+        df = pd.DataFrame(
+            [deepcopy_pd_series(self.df.sample(n=1, weights=weights, random_state=rng._bit_generator).iloc[0])
+             for weights in np.atleast_2d(prob)]
+        )
 
         # Get random coordinates
-        coords = self.mw_density.sample_eq(rng=rng)
+        coords = self.mw_density.sample_eq(shape=shape, rng=rng)
         # Magnitude correction to move object to given distance, assuming g is V
         mv = Mv + coords.distance.distmod.value
-        dm = mv - row['mag_folded_model_g'].mean()
+        dm = mv - df['mag_folded_model_g'].apply(np.mean)
 
         # Get extinction
-        row['ebv'] = get_sfd_thin_disk_ebv(coords.ra.deg, coords.dec.deg, coords.distance.pc, self.dustmaps_cache_dir)
+        df['ebv'] = get_sfd_thin_disk_ebv(coords.ra.deg, coords.dec.deg, coords.distance.pc, self.dustmaps_cache_dir)
 
         # Change period
-        import warnings
-        with warnings.catch_warnings(record=True) as warn:
-            row['folded_time_model'] *= period / row['period']
-            if warn:
-                breakpoint()
-        row['period'] = period
+        for period_, (_, row) in zip(period, df.iterrows()):
+            row['folded_time_model'] *= period_ / row['period']
+        df['period'] = period
 
         # Apply random color shift and add extinction
-        for column in row.keys():
+        for column in df.columns:
             if not column.startswith('mag_folded_model_'):
                 continue
             band = column[-1]
             # Apply dm, random color shift and extinction
-            row[column] += dm + row['ebv'] * LSST_A_TO_EBV[band] + rng.normal(scale=0.03)
+            for dm_, (_, row) in zip(dm, df.iterrows()):
+                row[column] += dm_ + row['ebv'] * LSST_A_TO_EBV[band] + rng.normal(scale=0.03)
 
         # Set coordinates
-        row['ra'] = coords.ra.to_value(u.deg)
-        row['dec'] = coords.dec.to_value(u.deg)
-        row['distance_pc'] = coords.distance.to_value(u.pc)
+        gal = coords.transform_to(self.__galactic_frame)
+        df['ra'] = coords.ra.deg
+        df['dec'] = coords.dec.deg
+        df['l'] = gal.l.deg
+        df['b'] = gal.b.deg
+        df['distance_pc'] = coords.distance.pc
 
-        return row
+        return df
 
     def sample_period(self, shape=(), rng=None):
         rng = np.random.default_rng(rng)
