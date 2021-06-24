@@ -388,7 +388,7 @@ class VsxFoldedModel:
                 anglematch_b = max(10, np.abs(row.b) - 15)
                 fh.write(
                     f'START_EVENT: {i_event}\n'
-                    f'NROW: {n_approx} RA: {row.ra:.5f} DEC: {row.dec:.5f}\n'
+                    f'NROW: {n_approx} l: {row.l:.5f} b: {row.b:.5f}\n'
                     f'PARVAL: {row.vsx_id},{row.period:.6g}\n'
                     f'ANGLEMATCH_b: {anglematch_b:.1f}\n'
                 )
