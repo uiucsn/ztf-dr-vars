@@ -357,9 +357,6 @@ class VsxFoldedModel:
         df = self.with_approxed(n_approx, endpoint=True, max_egr=max_egr)
         model = CepheidModel(df, self.data.dustmaps_cache_dir)
 
-        min_anglematch_b = max(1.0, 90.0 / np.sqrt(n_obj))
-        factor_anglematch_b = max(0.1, 1.0 / np.sqrt(n_obj))
-
         with open(path, 'w') as fh:
             fh.write(
                 f'SURVEY: {survey}\n'
@@ -371,7 +368,7 @@ class VsxFoldedModel:
                 '\n'
             )
             fh.write(
-                f'COMMENT: Created on {NOW.date()} by Konstantin Malanchev\n'
+                f'COMMENT: Created at {NOW.date()} by Konstantin Malanchev\n'
                 'COMMENT: Based on ZTF DR3 light curves cross-matched with VSX 2020.10 edition\n'
                 f'COMMENT: VSX types used: {", ".join(sorted(VSX_JOINED_TYPES[self.var_type].types))}\n'
                 'COMMENT: Periodic Gaussian process is used to approximate folded light curves\n'
@@ -388,7 +385,7 @@ class VsxFoldedModel:
                     logging.debug(
                         f"{self.var_type} light curve doesn't fit into SNANA supported magnitude range of [5.0, 99.0]"
                     )
-                anglematch_b = max(min_anglematch_b, factor_anglematch_b * row.b)
+                anglematch_b = max(10, np.abs(row.b) - 15)
                 fh.write(
                     f'START_EVENT: {i_event}\n'
                     f'NROW: {n_approx} RA: {row.ra:.5f} DEC: {row.dec:.5f}\n'
