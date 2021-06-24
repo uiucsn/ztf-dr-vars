@@ -385,7 +385,7 @@ class VsxFoldedModel:
                     logging.debug(
                         f"{self.var_type} light curve doesn't fit into SNANA supported magnitude range of [5.0, 99.0]"
                     )
-                anglematch_b = max(10, np.abs(row.b) - 15)
+                anglematch_b = max(5, 0.5 * np.abs(row.b))
                 fh.write(
                     f'START_EVENT: {i_event}\n'
                     f'NROW: {n_approx} l: {row.l:.5f} b: {row.b:.5f}\n'
