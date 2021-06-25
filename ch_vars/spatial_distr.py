@@ -27,7 +27,8 @@ class MilkyWayDensityBase(ABC):
             np.linspace(self.rho_max_kpc, self.rho_min_kpc, n_grid),
             np.linspace(self.z_min_kpc, self.z_max_kpc, n_grid)
         )
-        self.dens_grid = self.dens(self.rho, 0.0, self.z)
+        # We have to multiply it by rho because dx dy dz = rho dphi drho dz
+        self.dens_grid = self.rho * self.dens(self.rho, 0.0, self.z)
         self.dens_flat_cum = np.cumsum(self.dens_grid)
         self.dens_flat_cum /= self.dens_flat_cum[-1]
 
