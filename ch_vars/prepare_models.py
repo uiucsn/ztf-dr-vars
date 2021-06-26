@@ -368,13 +368,18 @@ class VsxFoldedModel:
                 '\n'
             )
             fh.write(
-                f'COMMENT: Created at {NOW.date()} by Konstantin Malanchev\n'
-                'COMMENT: Based on ZTF DR3 light curves cross-matched with VSX 2020.10 edition\n'
-                f'COMMENT: VSX types used: {", ".join(sorted(VSX_JOINED_TYPES[self.var_type].types))}\n'
-                'COMMENT: Periodic Gaussian process is used to approximate folded light curves\n'
-                'COMMENT: Bayestar 2019 was used for deredding, Green, Schlafly, Finkbeiner et al. (2019)\n'
-                'COMMENT: VSXOID is the VSX object identifier\n'
-                'COMMENT: PERIOD is the used period, in days\n'
+                'DOCUMENTATION:\n'
+                '  PURPOSE: Cepheid Galactic model, Based on ZTF DR3 light curves cross-matched with VSX 2020.10 edition\n'
+                '  REF:\n'
+                '  - AUTHOR: Konstantin Malanchev\n'
+                '  USAGE_KEY: GENMODEL\n'
+                '  NOTES:\n'
+                '  - Periodic Gaussian process is used to approximate folded light curves\n'
+                '  - Bayestar 2019 was used for deredding, Green, Schlafly, Finkbeiner et al. (2019)\n'
+                '  PARAMS:'
+                '  - VSXOID is the VSX object identifier\n'
+                '  - PERIOD is the used period, in days\n'
+                'DOCUMENTATION_END:\n'
                 '\n'
             )
             for i_event in range(n_obj):
