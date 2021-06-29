@@ -376,7 +376,7 @@ class VsxFoldedModel:
                 '  NOTES:\n'
                 '  - Periodic Gaussian process is used to approximate folded light curves\n'
                 '  - Bayestar 2019 was used for deredding, Green, Schlafly, Finkbeiner et al. (2019)\n'
-                '  PARAMS:'
+                '  PARAMS:\n'
                 '  - VSXOID is the VSX object identifier\n'
                 '  - PERIOD is the used period, in days\n'
                 'DOCUMENTATION_END:\n'
