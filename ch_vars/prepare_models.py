@@ -3,10 +3,10 @@ import logging
 import os
 import re
 import sys
+from abc import ABC, abstractmethod
 from argparse import ArgumentParser
-from copy import deepcopy
 from datetime import datetime
-from functools import partial
+from functools import cached_property, partial
 
 import astropy.constants as const
 import astropy.io.ascii
@@ -327,13 +327,23 @@ class VsxFoldedModel:
         t = re.sub(r'[^A-Z0-9]', '', t)
         return f'ZTFDR3VSX{t}'
 
+    @property
+    def _norm_var_type(self):
+        t = greek_to_latin(self.var_type)
+        t = re.sub(r'[^A-Za-z0-9]', '-', t)
+        return t
+
     def to_lclib(self, path, n_obj=100, n_approx=128, max_egr=np.inf, survey='ZTF', rng=None):
         logging.info(f'Generating {self.var_type} LCLIB for survey {survey}')
 
         rng = np.random.default_rng(rng)
 
-        if self.var_type != 'Cepheid':
-            logging.warning('LCLIB supports Cepheid variable type only')
+        if self.var_type == 'Cepheid':
+            model_cls = CepheidModel
+        elif self.var_type == 'δ Sct':
+            model_cls = DeltaScutiModel
+        else:
+            logging.warning('LCLIB supports Cepheid and δ Sct types only')
             return
 
         if survey == 'ZTF':
@@ -352,10 +362,10 @@ class VsxFoldedModel:
             raise ValueError(f'survey={survey} is not supported, use ZTF or LSST')
 
         if os.path.isdir(path):
-            path = os.path.join(path, f'LCLIB_{self.var_type}-{survey}.TEXT')
+            path = os.path.join(path, f'LCLIB_{self._norm_var_type}-{survey}.TEXT')
 
         df = self.with_approxed(n_approx, endpoint=True, max_egr=max_egr)
-        model = CepheidModel(df, self.data.dustmaps_cache_dir)
+        model = model_cls(df, self.data.dustmaps_cache_dir)
 
         with open(path, 'w') as fh:
             fh.write(
@@ -409,13 +419,22 @@ class VsxFoldedModel:
                 )
 
 
-class CepheidModel:
+class BasePulsatingModel(ABC):
     period_lognorm_s = 1.0
-    period_min = 0.3
-    ln_period_min = np.log(period_min)
-    period_max = 300
-    ln_period_max = np.log(period_max)
-    __galactic_frame = Galactic()
+
+    period_min = None
+    period_max = None
+    random_mag_sigma = None
+
+    _galactic_frame = Galactic()
+
+    @cached_property
+    def ln_period_min(self):
+        return np.log(self.period_min)
+
+    @cached_property
+    def ln_period_max(self):
+        return np.log(self.period_max)
 
     def __init__(self, df, dustmaps_cache_dir):
         self.df = df
@@ -427,10 +446,9 @@ class CepheidModel:
         scale = mean_period / stats.lognorm.mean(s=self.period_lognorm_s)
         return stats.lognorm.pdf(period, s=self.period_lognorm_s, scale=scale)
 
+    @abstractmethod
     def Mv_period(self, period):
-        # https://arxiv.org/pdf/0707.3144.pdf page 18
-        Mv = -3.932 - 2.819 * (np.log10(period) - 1.0)
-        return Mv
+        raise NotImplemented
 
     def sample(self, shape=(), rng=None):
         if len(shape) > 1:
@@ -468,10 +486,10 @@ class CepheidModel:
             band = column[-1]
             # Apply dm, random color shift and extinction
             for dm_, (_, row) in zip(dm, df.iterrows()):
-                row[column] += dm_ + row['ebv'] * LSST_A_TO_EBV[band] + rng.normal(scale=0.03)
+                row[column] += dm_ + row['ebv'] * LSST_A_TO_EBV[band] + rng.normal(scale=self.random_mag_sigma)
 
         # Set coordinates
-        gal = coords.transform_to(self.__galactic_frame)
+        gal = coords.transform_to(self._galactic_frame)
         df['ra'] = coords.ra.deg
         df['dec'] = coords.dec.deg
         df['l'] = gal.l.deg
@@ -487,11 +505,35 @@ class CepheidModel:
         return period
 
 
+class CepheidModel(BasePulsatingModel):
+    period_min = 0.3
+    period_max = 300
+    random_mag_sigma = 0.2
+
+    def Mv_period(self, period):
+        # https://arxiv.org/pdf/0707.3144.pdf page 18
+        Mv = -3.932 - 2.819 * (np.log10(period) - 1.0)
+        return Mv
+
+
+class DeltaScutiModel(BasePulsatingModel):
+    period_min = 1.0 / 24
+    period_max = 3
+    random_mag_sigma = 0.3
+
+    def Mv_period(self, period):
+        # https://arxiv.org/pdf/1004.0950.pdf page 10
+        # Assuming LMC distmod = 18.50
+        Mv = -2.84 * np.log10(period) - 0.82
+        return Mv
+
+
 def prepare_vsx_folded(cli_args):
     import ch_vars.data.good_vsx_folded as data
 
     good_ids = get_ids(data)
     data_getter = VsxDataGetter(cli_args.data, cli_args.cache, good_ids)
+    rng = np.random.default_rng(0)
     for var_type, ids in good_ids.items():
         model = VsxFoldedModel(data_getter, var_type, ids)
         if cli_args.csv:
@@ -502,7 +544,7 @@ def prepare_vsx_folded(cli_args):
             else:
                 surveys = [cli_args.survey]
             for survey in surveys:
-                model.to_lclib(cli_args.output, n_obj=cli_args.count, max_egr=cli_args.maxegr, survey=survey, rng=0)
+                model.to_lclib(cli_args.output, n_obj=cli_args.count, max_egr=cli_args.maxegr, survey=survey, rng=rng)
         if cli_args.plots:
             model.plots(cli_args.output)
 
