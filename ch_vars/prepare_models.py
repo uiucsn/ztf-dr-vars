@@ -379,7 +379,7 @@ class VsxFoldedModel:
             )
             fh.write(
                 'DOCUMENTATION:\n'
-                '  PURPOSE: Cepheid Galactic model, Based on ZTF DR3 light curves cross-matched with VSX 2020.10 edition\n'
+                f'  PURPOSE: {self._lclib_model_name} Galactic model, Based on ZTF DR3 light curves cross-matched with VSX 2020.10 edition\n'
                 '  REF:\n'
                 '  - AUTHOR: Konstantin Malanchev\n'
                 '  USAGE_KEY: GENMODEL\n'
