@@ -369,15 +369,6 @@ class VsxFoldedModel:
 
         with open(path, 'w') as fh:
             fh.write(
-                f'SURVEY: {survey}\n'
-                f'FILTERS: {"".join(band_names)}\n'
-                f'MODEL: {self._lclib_model_name}\n'  # CHECKME
-                'MODEL_PARNAMES: VSXOID,PERIOD\n'  # CHECKME
-                'RECUR_CLASS: RECUR-PERIODIC\n'
-                f'NEVENT: {n_obj}\n'
-                '\n'
-            )
-            fh.write(
                 'DOCUMENTATION:\n'
                 f'  PURPOSE: {self._lclib_model_name} Galactic model, Based on ZTF DR3 light curves cross-matched with VSX 2020.10 edition\n'
                 '  REF:\n'
@@ -387,9 +378,19 @@ class VsxFoldedModel:
                 '  - Periodic Gaussian process is used to approximate folded light curves\n'
                 '  - Bayestar 2019 was used for deredding, Green, Schlafly, Finkbeiner et al. (2019)\n'
                 '  PARAMS:\n'
+                '  - MWEBV is the Galactic E(B-V)\n'
                 '  - VSXOID is the VSX object identifier\n'
                 '  - PERIOD is the used period, in days\n'
                 'DOCUMENTATION_END:\n'
+                '\n'
+            )
+            fh.write(
+                f'SURVEY: {survey}\n'
+                f'FILTERS: {"".join(band_names)}\n'
+                f'MODEL: {self._lclib_model_name}\n'  # CHECKME
+                'MODEL_PARNAMES: MWEBV,VSXOID,PERIOD\n'  # CHECKME
+                'RECUR_CLASS: RECUR-PERIODIC\n'
+                f'NEVENT: {n_obj}\n'
                 '\n'
             )
             for i_event in range(n_obj):
@@ -404,7 +405,7 @@ class VsxFoldedModel:
                 fh.write(
                     f'START_EVENT: {i_event}\n'
                     f'NROW: {n_approx} l: {row.l:.5f} b: {row.b:.5f}\n'
-                    f'PARVAL: {row.vsx_id},{row.period:.6g}\n'
+                    f'PARVAL: {row.ebv:.3f},{row.vsx_id},{row.period:.6g}\n'
                     f'ANGLEMATCH_b: {anglematch_b:.1f}\n'
                 )
                 for i in range(n_approx):
@@ -421,10 +422,6 @@ class VsxFoldedModel:
 
 class BasePulsatingModel(ABC):
     period_lognorm_s = 1.0
-
-    period_min = None
-    period_max = None
-    random_mag_sigma = None
 
     _galactic_frame = Galactic()
 
@@ -499,6 +496,7 @@ class BasePulsatingModel(ABC):
         return df
 
     def sample_period(self, shape=(), rng=None):
+        raise NotImplemented
         rng = np.random.default_rng(rng)
         # Uniform log-period
         period = np.exp(rng.uniform(low=self.ln_period_min, high=self.ln_period_max, size=shape))
@@ -506,8 +504,11 @@ class BasePulsatingModel(ABC):
 
 
 class CepheidModel(BasePulsatingModel):
-    period_min = 0.3
+    period_min = 0.25
     period_max = 300
+    # https://iopscience.iop.org/article/10.1086/300736/meta
+    period_ln_mean = np.log(3.0)
+    period_ln_std = 0.2
     random_mag_sigma = 0.2
 
     def Mv_period(self, period):
@@ -515,10 +516,20 @@ class CepheidModel(BasePulsatingModel):
         Mv = -3.932 - 2.819 * (np.log10(period) - 1.0)
         return Mv
 
+    def sample_period(self, shape=(), rng=None):
+        rng = np.random.default_rng(rng)
+        period = np.zeros(shape)
+        idx_to_sample = np.ones(shape, dtype=bool)
+        while np.any(idx_to_sample):
+            idx_to_sample = (period[idx_to_sample] < period_min) & (period[idx_to_sample] > period_max)
+            n_to_sample = np.count_nonzero(idx_to_sample)
+            period[idx_to_sample] = np.exp(rng.normal(self.period_ln_mean, self.period_ln_std, n_to_sample))
+        return period
+
 
 class DeltaScutiModel(BasePulsatingModel):
-    period_min = 1.0 / 24
-    period_max = 3
+    period_min = 10.0 / 24 / 60  # https://ui.adsabs.harvard.edu/abs/2014MNRAS.439.2078H/abstract
+    period_max = 12.0 / 24
     random_mag_sigma = 0.3
 
     def Mv_period(self, period):
@@ -526,6 +537,10 @@ class DeltaScutiModel(BasePulsatingModel):
         # Assuming LMC distmod = 18.50
         Mv = -2.84 * np.log10(period) - 0.82
         return Mv
+
+    def sample_period(self, shape=(), rng=None):
+        rng = np.random.default_rng(rng)
+        return rng.uniform(period_min, period_max, shape)
 
 
 def prepare_vsx_folded(cli_args):

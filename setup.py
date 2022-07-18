@@ -25,6 +25,10 @@ setup(
         'pandas',
         'scipy',
         'astroquery',
+        'joblib',
+        'gatspy',
+        'george',
+        'dustmaps'
     ],
     license='',
     author='Konstantin Malanchev',
