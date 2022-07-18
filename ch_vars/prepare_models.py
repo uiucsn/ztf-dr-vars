@@ -497,18 +497,19 @@ class BasePulsatingModel(ABC):
 
     def sample_period(self, shape=(), rng=None):
         raise NotImplemented
-        rng = np.random.default_rng(rng)
-        # Uniform log-period
-        period = np.exp(rng.uniform(low=self.ln_period_min, high=self.ln_period_max, size=shape))
-        return period
 
 
 class CepheidModel(BasePulsatingModel):
     period_min = 0.25
     period_max = 300
-    # https://iopscience.iop.org/article/10.1086/300736/meta
-    period_ln_mean = np.log(3.0)
-    period_ln_std = 0.2
+    # Adopted from OGLE IV galaxy disc fundamental cepheids
+    weight1 = 0.707
+    # weight2 = 1.0 - weight1
+    period_lg_mean_1 = 0.608
+    period_lg_mean_2 = 1.163
+    period_lg_std_1 = 0.1765
+    period_lg_std_2 = 0.2409
+
     random_mag_sigma = 0.2
 
     def Mv_period(self, period):
@@ -516,13 +517,21 @@ class CepheidModel(BasePulsatingModel):
         Mv = -3.932 - 2.819 * (np.log10(period) - 1.0)
         return Mv
 
+    def _sample_no_limits(self, n, rng):
+        # Can be twice faster, but I'm lazy
+        return 10.0 ** np.where(
+            rng.random() < self.weight1,
+            rng.normal(self.period_lg_mean_1, self.period_lg_std_1, n),
+            rng.normal(self.period_lg_mean_2, self.period_lg_std_2, n),
+        )
+
     def sample_period(self, shape=(), rng=None):
         rng = np.random.default_rng(rng)
         period = np.zeros(shape)
         idx_to_sample = np.ones(shape, dtype=bool)
         while np.any(idx_to_sample):
             n_to_sample = np.count_nonzero(idx_to_sample)
-            period[idx_to_sample] = np.exp(rng.normal(self.period_ln_mean, self.period_ln_std, n_to_sample))
+            period[idx_to_sample] = self._sample_no_limits(n_to_sample, rng)
             idx_to_sample = (period[idx_to_sample] < self.period_min) & (period[idx_to_sample] > self.period_max)
         return period
 
