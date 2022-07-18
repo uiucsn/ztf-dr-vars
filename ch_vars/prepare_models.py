@@ -521,9 +521,9 @@ class CepheidModel(BasePulsatingModel):
         period = np.zeros(shape)
         idx_to_sample = np.ones(shape, dtype=bool)
         while np.any(idx_to_sample):
-            idx_to_sample = (period[idx_to_sample] < period_min) & (period[idx_to_sample] > period_max)
             n_to_sample = np.count_nonzero(idx_to_sample)
             period[idx_to_sample] = np.exp(rng.normal(self.period_ln_mean, self.period_ln_std, n_to_sample))
+            idx_to_sample = (period[idx_to_sample] < self.period_min) & (period[idx_to_sample] > self.period_max)
         return period
 
 
@@ -540,7 +540,7 @@ class DeltaScutiModel(BasePulsatingModel):
 
     def sample_period(self, shape=(), rng=None):
         rng = np.random.default_rng(rng)
-        return rng.uniform(period_min, period_max, shape)
+        return rng.uniform(self.period_min, self.period_max, shape)
 
 
 def prepare_vsx_folded(cli_args):
