@@ -333,7 +333,8 @@ class VsxFoldedModel:
         t = re.sub(r'[^A-Za-z0-9]', '-', t)
         return t
 
-    def to_lclib(self, path, n_obj=100, n_approx=128, max_egr=np.inf, survey='ZTF', rng=None):
+    def to_lclib(self, path, n_obj=100, n_approx=128, max_egr=np.inf, survey='ZTF', saturation_mag=5.0, limit_mag=99.0,
+                 rng=None):
         logging.info(f'Generating {self.var_type} LCLIB for survey {survey}')
 
         rng = np.random.default_rng(rng)
@@ -396,11 +397,17 @@ class VsxFoldedModel:
             for i_event in range(n_obj):
                 while True:
                     row = model.sample(rng=rng).iloc[0]
-                    if all(np.all((magn(row, None, band) > 5.0) & (magn(row, None, band) < 99.0)) for band in bands):
-                        break
-                    logging.debug(
-                        f"{self.var_type} light curve doesn't fit into SNANA supported magnitude range of [5.0, 99.0]"
-                    )
+                    if not all(np.all((magn(row, None, band) > 5.0) & (magn(row, None, band) < 99.0)) for band in bands):
+                        logging.debug(
+                            f"{self.var_type} light curve doesn't have any points in SNANA supported magnitude range of [5.0, 99.0]"
+                        )
+                        continue
+                    if not any(np.any((magn(row, None, band) > saturation_mag) & (magn(row, None, band) < limit_mag)) for band in bands):
+                        logging.debug(
+                            f"{self.var_type} light curve doesn't have any observable point in range of [{saturation_mag}, {limit_mag}]"
+                        )
+                        continue
+                    break
                 anglematch_b = max(5, 0.5 * np.abs(row.b))
                 fh.write(
                     f'START_EVENT: {i_event}\n'
@@ -570,7 +577,8 @@ def prepare_vsx_folded(cli_args):
             else:
                 surveys = [cli_args.survey]
             for survey in surveys:
-                model.to_lclib(cli_args.output, n_obj=cli_args.count, max_egr=cli_args.maxegr, survey=survey, rng=rng)
+                model.to_lclib(cli_args.output, n_obj=cli_args.count, max_egr=cli_args.maxegr, survey=survey,
+                               saturation_mag=cli_args.saturation, limit_mag=cli_args.limit_mag, rng=rng)
         if cli_args.plots:
             model.plots(cli_args.output)
 
@@ -586,6 +594,8 @@ def parse_args():
                         help='data root, could be local path or HTTP URL (URL IS BROKEN FOR VSX DUE TO AN ISSUE WITH PANDAS)')
     parser.add_argument('--cache', default=None, help='directory to use as cache location')
     parser.add_argument('-o', '--output', default='.', help='directory to save models')
+    parser.add_argument('--saturation', default=5.0, type=float, help='saturation mag')
+    parser.add_argument('--limit-mag', default=99.0, type=float, help='limit mag')
     parser.add_argument('--maxegr', default=np.inf, type=float,
                         help='filter objects with E_gr larger or equal than given')
     args = parser.parse_args()
