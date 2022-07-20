@@ -495,8 +495,24 @@ class BasePulsatingModel(ABC):
 
         return df
 
+    def _sample_period_no_limits(self, n, rng):
+        # Can be twice faster, but I'm lazy
+        return 10.0 ** np.where(
+            rng.random() < self.weight1,
+            rng.normal(self.period_lg_mean_1, self.period_lg_std_1, n),
+            rng.normal(self.period_lg_mean_2, self.period_lg_std_2, n),
+        )
+
     def sample_period(self, shape=(), rng=None):
-        raise NotImplemented
+        rng = np.random.default_rng(rng)
+        period = np.zeros(shape)
+        idx_to_sample = np.ones(shape, dtype=bool)
+        n_to_sample = np.product(shape, dtype=int)
+        while n_to_sample > 0:
+            period[idx_to_sample] = self._sample_period_no_limits(n_to_sample, rng)
+            idx_to_sample = (period[idx_to_sample] < self.period_min) & (period[idx_to_sample] > self.period_max)
+            n_to_sample = np.count_nonzero(idx_to_sample)
+        return period
 
 
 class CepheidModel(BasePulsatingModel):
@@ -517,28 +533,18 @@ class CepheidModel(BasePulsatingModel):
         Mv = -3.932 - 2.819 * (np.log10(period) - 1.0)
         return Mv
 
-    def _sample_no_limits(self, n, rng):
-        # Can be twice faster, but I'm lazy
-        return 10.0 ** np.where(
-            rng.random() < self.weight1,
-            rng.normal(self.period_lg_mean_1, self.period_lg_std_1, n),
-            rng.normal(self.period_lg_mean_2, self.period_lg_std_2, n),
-        )
-
-    def sample_period(self, shape=(), rng=None):
-        rng = np.random.default_rng(rng)
-        period = np.zeros(shape)
-        idx_to_sample = np.ones(shape, dtype=bool)
-        while np.any(idx_to_sample):
-            n_to_sample = np.count_nonzero(idx_to_sample)
-            period[idx_to_sample] = self._sample_no_limits(n_to_sample, rng)
-            idx_to_sample = (period[idx_to_sample] < self.period_min) & (period[idx_to_sample] > self.period_max)
-        return period
-
 
 class DeltaScutiModel(BasePulsatingModel):
     period_min = 10.0 / 24 / 60  # https://ui.adsabs.harvard.edu/abs/2014MNRAS.439.2078H/abstract
     period_max = 12.0 / 24
+    # Adopted from OGLE 3 catalog
+    weight1 = 0.769
+    # weight2 = 1.0 - weight1
+    period_lg_mean_1 = -1.0906
+    period_lg_mean_2 = - 0.7985
+    period_lg_std_1 = 0.0981
+    period_lg_std_2 = 0.1233
+
     random_mag_sigma = 0.3
 
     def Mv_period(self, period):
@@ -546,10 +552,6 @@ class DeltaScutiModel(BasePulsatingModel):
         # Assuming LMC distmod = 18.50
         Mv = -2.84 * np.log10(period) - 0.82
         return Mv
-
-    def sample_period(self, shape=(), rng=None):
-        rng = np.random.default_rng(rng)
-        return rng.uniform(self.period_min, self.period_max, shape)
 
 
 def prepare_vsx_folded(cli_args):
