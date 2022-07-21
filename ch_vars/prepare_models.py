@@ -399,7 +399,7 @@ class VsxFoldedModel:
                     row = model.sample(rng=rng).iloc[0]
                     if not all(np.all((magn(row, None, band) > 5.0) & (magn(row, None, band) < 99.0)) for band in bands):
                         logging.debug(
-                            f"{self.var_type} light curve doesn't have any points in SNANA supported magnitude range of [5.0, 99.0]"
+                            f"{self.var_type} light curve have some points out of SNANA supported magnitude range [5.0, 99.0]"
                         )
                         continue
                     if not any(np.any((magn(row, None, band) > saturation_mag) & (magn(row, None, band) < limit_mag)) for band in bands):
