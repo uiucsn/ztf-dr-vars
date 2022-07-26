@@ -15,6 +15,7 @@ setup(
         'plot-milky-way = ch_vars.spatial_distr:plot_milky_way_entrypoint',
         'plot-extragal = ch_vars.spatial_distr:plot_extragalactic_entrypoint',
         'plot-map = ch_vars.spatial_distr:plot_map_entrypoint',
+        'plot-extinction = ch_vars.extinction:plot_extinction_entrypoint',
     ]},
     include_package_data=True,
     url='https://github.com/uiucsn/ztf-dr-vars',

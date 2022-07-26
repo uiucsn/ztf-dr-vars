@@ -1,4 +1,7 @@
+import logging
 import math
+import os
+from argparse import ArgumentParser
 
 import numpy as np
 from astropy import units as u
@@ -74,8 +77,8 @@ class SFDDustMap(_SFDDustMap):
 
 class PatchedBayestarDustMap:
     def __init__(self, cache_dir):
-        self.bayestar = BayestarDustMap(cache_dir)
-        self.sfd = SFDDustMap(cache_dir)
+        self.bayestar = BayestarDustMap(cache_dir).bayestar
+        self.sfd = SFDDustMap(cache_dir).sfd
 
     def bayestar_ext(self, coord):
         gal = coord.galactic
@@ -86,7 +89,7 @@ class PatchedBayestarDustMap:
         flipped_extinction = self.bayestar(flipped_coords, mode='best')
         normalized_flipped_extinction = np.where(
             (flipped_sfd != 0) & (sfd != 0),
-            flipped_extinction * flipped_sfd / sfd,
+            flipped_extinction * sfd / flipped_sfd,
             flipped_extinction,
         )
         ext = np.where(np.isnan(extinction), normalized_flipped_extinction, extinction)
@@ -173,3 +176,45 @@ LSST_A_TO_EBV = {
     'z': 1.323,
     'Y': 1.088,
 }
+
+
+def plot_extinction_entrypoint(args=None):
+    import matplotlib.pyplot as plt
+
+    logging.basicConfig(level=logging.DEBUG)
+
+    parser = ArgumentParser('Extinction maps')
+    parser.add_argument('-o', '--output', default='figs',
+                        help='directory to save a figure')
+    parser.add_argument('-c', '--cache', default='cache/dustmaps')
+    parser.add_argument('-d', '--distance', type=float, default=1000,
+                        help='distance in pc')
+    cli_args = parser.parse_args(args)
+
+    ra, dec = np.meshgrid(np.linspace(-180, 180, 361, endpoint=False), np.linspace(-90, 90, 181, endpoint=False))
+    coords = SkyCoord(ra=ra * u.degree, dec=dec * u.degree, distance=cli_args.distance * u.pc)
+
+    quasi_sfd = get_sfd_thin_disk_ebv(coords.ra.deg, coords.dec.deg, coords.distance.pc, cli_args.cache)
+    quasi_bayestar = PatchedBayestarDustMap(cli_args.cache).ebv(coords)
+
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection="mollweide")
+    # Minus RA is a trick to have "inside" view to the celestial sphere
+    scatter = ax.scatter(-coords.ra.wrap_at(180 * u.deg).radian, coords.dec.wrap_at(180 * u.deg).radian,
+                         s=3, c=quasi_sfd, cmap='Greys', vmin=0, vmax=2)
+    ax.set_xticklabels(['10h', '8h', '6h', '4h', '2h', '0h', '22h', '20h', '18h', '16h', '14h'])
+    ax.set_title(f'Distance = {cli_args.distance} pc')
+    colorbar = fig.colorbar(scatter)
+    colorbar.set_label('E(B-V)')
+    fig.savefig(os.path.join(cli_args.output, f'extinction_SFD_extrapolation_{cli_args.distance}pc.png'))
+
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection="mollweide")
+    # Minus RA is a trick to have "inside" view to the celestial sphere
+    scatter = ax.scatter(-coords.ra.wrap_at(180 * u.deg).radian, coords.dec.wrap_at(180 * u.deg).radian,
+                         s=3, c=quasi_bayestar, cmap='Greys', vmin=0, vmax=2)
+    ax.set_xticklabels(['10h', '8h', '6h', '4h', '2h', '0h', '22h', '20h', '18h', '16h', '14h'])
+    ax.set_title(f'Distance = {cli_args.distance} pc')
+    colorbar = fig.colorbar(scatter)
+    colorbar.set_label('E(B-V)')
+    fig.savefig(os.path.join(cli_args.output, f'extinction_Bayestar_flipping_{cli_args.distance}pc.png'))
